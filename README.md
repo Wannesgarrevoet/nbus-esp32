@@ -46,6 +46,18 @@ arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc firmware
 arduino-cli upload  --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc -p <PORT> firmware
 ```
 
+Required libraries (install via `arduino-cli lib install "<name>"`):
+
+- `WiFiManager` (tzapu) — captive-portal provisioning
+- `PubSubClient` (knolleary) — MQTT client
+- `ElegantOTA` (ayushsharma82) — browser OTA
+- `ArduinoJson` (bblanchon) — MQTT JSON payloads & discovery configs
+
+Host-side parser tests build with a plain C++17 compiler:
+
+```bash
+g++ -std=c++17 -I firmware test/test_parser.cpp firmware/NBusParser.cpp -o /tmp/t && /tmp/t
+```
 
 ## First-time setup
 
