@@ -1,0 +1,17 @@
+# Arduino / arduino-cli build output
+/build/
+/firmware/build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# Local secrets (WiFiManager stores credentials on-device; nothing should be committed)
+secrets.h
+*.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
