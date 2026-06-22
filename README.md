@@ -25,10 +25,11 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
 
 ## Hardware
 
-- ESP32 dev board (e.g. ESP32-WROOM-32 DevKitC)
+- **ESP32-C3 Super Mini** (other ESP32 boards work too; pins differ — see `docs/wiring.md`)
 - **TJA1021 or TJA1027** LIN transceiver breakout (TJA1027 preferred: it has a VIO
   pin for native 3.3 V logic)
-- 12 V → 5 V buck converter to power the ESP32 from the bus
+- 12 V → 5 V buck converter to power the board from the bus (the C3 has only a linear
+  LDO on board — **never feed it 12 V directly**)
 - 6P6C (RJ12) connector / pigtail for the N-Bus
 
 See [`docs/wiring.md`](docs/wiring.md) for the full wiring and the RJ12 pinout.
@@ -40,8 +41,9 @@ This project uses the Arduino toolchain. You can build with the Arduino IDE or
 
 ```bash
 arduino-cli core install esp32:esp32
-arduino-cli compile --fqbn esp32:esp32:esp32 firmware
-arduino-cli upload  --fqbn esp32:esp32:esp32 -p <PORT> firmware
+# Enable USB CDC On Boot so logs appear over the USB-C port:
+arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc firmware
+arduino-cli upload  --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc -p <PORT> firmware
 ```
 
 
