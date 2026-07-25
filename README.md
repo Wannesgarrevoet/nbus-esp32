@@ -28,9 +28,15 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
 - **ESP32-C3 Super Mini** (other ESP32 boards work too; pins differ — see `docs/wiring.md`)
 - **TJA1021 or TJA1027** LIN transceiver breakout (TJA1027 preferred: it has a VIO
   pin for native 3.3 V logic)
-- 12 V → 5 V buck converter to power the board from the bus (the C3 has only a linear
-  LDO on board — **never feed it 12 V directly**)
+- A **separate USB power supply** for the ESP32 (charger, power bank or laptop) — the
+  board is *not* powered from the bus; only the transceiver takes the bus 12 V. The two
+  supplies must share a common ground.
 - 6P6C (RJ12) connector / pigtail for the N-Bus
+
+> ⚠️ **Do not power the ESP32 through a buck converter fed from the bus.** The C3 has
+> only a linear LDO on board, and a converter's inrush current can trip the battery
+> BMS's short-circuit protection — taking the whole 12 V circuit down. Never feed 12 V
+> to a board pin either.
 
 See [`docs/wiring.md`](docs/wiring.md) for the full wiring and the RJ12 pinout.
 
