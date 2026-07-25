@@ -40,13 +40,25 @@ Frame payload (8 data bytes): `NAD  PCI  SID  reg  d0 d1 d2 d3` + checksum.
 
 ## Register map — NAD 0x85 (battery)
 
+Status is judged against **our own N-Bus captures**: CONFIRMED means we saw it on this
+bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture it.
+
 | reg | bytes | meaning | unit | status |
 |-----|-------|---------|------|--------|
-| 0x02 | `Vh Vl Ih Il` | battery voltage + battery current | V=0.01 V; I=0.01 A, **bit15=1 → discharging** | CONFIRMED |
+| 0x02 | `Vh Vl Ih Il` | battery voltage + battery current | V=0.01 V; I=0.01 A, **bit15=1 → discharging**; bit15=0 → charging (LIKELY, BLE) | CONFIRMED (discharge only) |
+| 0x07 | `Ah…` | nominal capacity (150 Ah) | Ah | LIKELY (BLE) — verify layout on bus |
 | 0x0B | `b0` | State of Charge | % (0x4B = 75%) | CONFIRMED |
-| 0x56 | `c1h c1l c2h c2l` | cell voltages | 0.001 V (~3.3 V) | LIKELY |
-| 0x57 | `c3h c3l c4h c4l` | cell voltages | 0.001 V | LIKELY |
+| 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | LIKELY (BLE) — verify on bus |
+| 0x34 | `H1h H1l H2h H2l` | H1 non-FFFF only while charging, H2 non-FFFF only while discharging; meaning unknown | ? | UNRESOLVED (also open in BLE) |
+| 0x36 | `Wh Wl (FF FF)` | remaining energy | Wh, big-endian 16-bit | LIKELY (BLE) — matches app's ~1487/1479 Wh; verify on bus |
+| 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
+| 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x54 | ASCII | serial-number fragment ("KAA") | text | CONFIRMED |
+
+> **Remaining runtime** is *not* a register. The official app (and the BLE project)
+> **compute** it from remaining Wh (0x36) ÷ smoothed power (U·I from 0x02), using a
+> ~30 s exponential moving average on the power to stop the estimate from jumping.
+> We should do the same rather than hunt for a runtime register.
 
 ## Register map — NAD 0x81 (solar charger)
 
@@ -69,7 +81,22 @@ Frame payload (8 data bytes): `NAD  PCI  SID  reg  d0 d1 d2 d3` + checksum.
 
 ## Still to determine
 
-- Remaining Wh (cap5 1487 Wh / cap6 1479 Wh) — register not yet located.
-- Remaining discharge time.
-- Exact cell-register layout (56/57).
-- Behaviour while charging (positive battery current): expect bit15=0; to be confirmed with a daytime capture.
+- Confirm 0x36 (Wh), 0x0E (quality) and 0x07 (capacity) are actually emitted on the
+  battery's **N-Bus** node 0x85 (they are confirmed over BLE for the same battery; the
+  parameter numbering is shared, but we haven't yet captured them on the wire).
+- Meaning of 0x34's H1/H2 fields (still open in the BLE project too).
+- Behaviour while charging (positive battery current): the BLE cross-check says bit15=0,
+  but we have never captured a charging frame ourselves. Needs a daytime capture.
+- Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
+  project; the values themselves we do see on our bus.
+
+## Cross-reference: BLE project (MartinusTech)
+
+An independent project reads the **same battery family over BLE** (Telit BlueMod+S50,
+service 0xFEFB) instead of the wired N-Bus:
+<https://github.com/MartinusTech/ESP32-BLE-Reader-for-Buettner-Dometic-Tempra-TLB150-BMS>.
+Its telemetry frames are `23 85 0F <ParamID> d0 d1 d2 d3` — the **same node byte (0x85)
+and the same ParamID/data semantics** we see on the N-Bus, which is why 0x02, 0x0B and
+the 0x56/0x57 cell layout match byte-for-byte between the two. It additionally decodes
+0x0E (quality), 0x36 (Wh) and 0x07 (capacity), and computes remaining runtime as noted
+above. It credits this repo for the 0x02 formula.

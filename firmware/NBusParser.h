@@ -20,8 +20,11 @@ struct NBusState {
   float batt_voltage = 0.0f;  bool batt_voltage_valid = false;
   float batt_current = 0.0f;  bool batt_current_valid = false;  // negative = discharging
   int   batt_soc     = 0;     bool batt_soc_valid     = false;
+  int   batt_wh      = 0;     bool batt_wh_valid      = false;  // remaining energy (Wh)
+  int   batt_quality = 0;     bool batt_quality_valid = false;  // "quality" / SoH-like (%)
+  int   batt_capacity_ah = 0; bool batt_capacity_valid = false; // nominal capacity (Ah)
   float cell_v[4]    = {0, 0, 0, 0};                             // cell voltages (V)
-  bool  cell_valid[4]= {false, false, false, false};
+  bool  cell_valid[4]= {false, false, false, false};            // [0..1]=reg0x56, [2..3]=reg0x57
 
   // Solar charger (NAD 0x81)
   float solar_voltage = 0.0f; bool solar_valid   = false;        // shared valid for V+I

@@ -38,20 +38,37 @@ bool NBusParser::decodeBattery(uint8_t reg, const uint8_t* d) {
       state_.batt_soc_valid = true;
       return true;
 
-    case 0x56:  // cell pair 1,2 (×0.001 V) — provisional layout
+    case 0x0E:  // d0 → "quality" % (SoH-like). Cross-confirmed over BLE; verify on bus.
+      state_.batt_quality = d[0];
+      state_.batt_quality_valid = true;
+      return true;
+
+    case 0x36:  // Wh Wl → remaining energy (big-endian u16). Cross-confirmed over BLE.
+      state_.batt_wh = nbus_u16(d[0], d[1]);
+      state_.batt_wh_valid = true;
+      return true;
+
+    case 0x07:  // nominal capacity ≈150 Ah. Layout provisional (BLE), verify on bus.
+      state_.batt_capacity_ah = nbus_u16(d[0], d[1]);
+      state_.batt_capacity_valid = true;
+      return true;
+
+    case 0x56:  // cells 1 & 2 (×0.001 V, big-endian) — cell order from BLE cross-check
       state_.cell_v[0] = nbus_u16(d[0], d[1]) * 0.001f;
       state_.cell_v[1] = nbus_u16(d[2], d[3]) * 0.001f;
       state_.cell_valid[0] = state_.cell_valid[1] = true;
       return true;
 
-    case 0x57:  // cell pair 3,4 (×0.001 V) — provisional layout
+    case 0x57:  // cells 3 & 4 (×0.001 V, big-endian) — cell order from BLE cross-check
       state_.cell_v[2] = nbus_u16(d[0], d[1]) * 0.001f;
       state_.cell_v[3] = nbus_u16(d[2], d[3]) * 0.001f;
       state_.cell_valid[2] = state_.cell_valid[3] = true;
       return true;
 
     default:
-      return false;  // 0x54 serial fragment etc. — ignored for now
+      // 0x54 serial fragment, 0x34 (H1/H2 charge/discharge, meaning unknown), etc. —
+      // ignored for now.
+      return false;
   }
 }
 

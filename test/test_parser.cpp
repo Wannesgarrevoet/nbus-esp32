@@ -64,7 +64,7 @@ int main() {
     check_int("v3 batt_soc", p.state().batt_soc, 75);
   }
 
-  // --- Vector 4: cell voltages (reg 0x57 → cells 3,4) ---
+  // --- Vector 4: cell voltages (reg 0x57 -> cells 3,4) ---
   {
     NBusParser p;
     const uint8_t f[] = {0x85, 0x06, 0xF4, 0x57, 0x0D, 0x23, 0x0D, 0x21};
@@ -88,6 +88,40 @@ int main() {
     const uint8_t f[] = {0x81, 0x06, 0xF4, 0x01, 0x04, 0xF7, 0x00, 0x00};
     check_true("v6 accepted", p.feedResponse(f, sizeof f));
     check_near("v6 starter_voltage", p.state().starter_voltage, 12.71f);
+  }
+
+  // --- Vector 7: cell voltages (reg 0x56 -> cells 1,2) ---
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x56, 0x0D, 0x24, 0x0D, 0x22};
+    check_true("v7 accepted", p.feedResponse(f, sizeof f));
+    check_near("v7 cell_v[0]", p.state().cell_v[0], 3.364f, 0.001f);
+    check_near("v7 cell_v[1]", p.state().cell_v[1], 3.362f, 0.001f);
+  }
+
+  // --- Vector 8: remaining energy Wh (reg 0x36, big-endian u16) ---
+  // 0x05CF = 1487 Wh (matches the app reading). Cross-confirmed via the BLE project.
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x36, 0x05, 0xCF, 0xFF, 0xFF};
+    check_true("v8 accepted", p.feedResponse(f, sizeof f));
+    check_int("v8 batt_wh", p.state().batt_wh, 1487);
+  }
+
+  // --- Vector 9: "quality" % (reg 0x0E, d0) ---
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x0E, 0x63, 0xFF, 0xFF, 0xFF};
+    check_true("v9 accepted", p.feedResponse(f, sizeof f));
+    check_int("v9 batt_quality", p.state().batt_quality, 99);
+  }
+
+  // --- Vector 10: nominal capacity Ah (reg 0x07, big-endian u16) — layout provisional ---
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x07, 0x00, 0x96, 0xFF, 0xFF};
+    check_true("v10 accepted", p.feedResponse(f, sizeof f));
+    check_int("v10 batt_capacity_ah", p.state().batt_capacity_ah, 150);
   }
 
   // --- Negative cases: frames that must be rejected ---
