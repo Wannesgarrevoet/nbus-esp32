@@ -79,6 +79,25 @@ Reverse-engineering is functional for the core values (SoC, V, I, solar, starter
 A few registers (remaining Wh, runtime estimate, exact cell mapping) are still being
 mapped — contributions welcome.
 
+## Disclaimer
+
+This is an independent, community reverse-engineering project. It is not affiliated
+with, endorsed by, or supported by Dometic, Büttner Elektronik, NDS Energy, or Tempra.
+All product and company names are trademarks of their respective owners.
+
+This project exists purely for interoperability: to let owners of such a system read
+their own telemetry without depending on the official app or display panel. No
+proprietary code, binaries, or assets are included or distributed here — everything in
+this repository is original code based on observed protocol behaviour.
+
+This software is provided "AS IS", without warranty of any kind. It is strictly
+read-only: the firmware never transmits on the bus, and the transceiver's TX path is
+left unconnected in hardware as well. Even so, you are tapping into the LIN bus that a
+lithium battery BMS, a solar charger and other vehicle electronics use to talk to each
+other, and mis-wiring it can disturb that communication or damage hardware. Use at your
+own risk. The author is not responsible for any damage to hardware, batteries, vehicles,
+or other systems. See [`LICENSE`](LICENSE) for the full license text.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
