@@ -11,11 +11,11 @@ Pin numbering: clip down, gold contacts toward you → pin 1 left, pin 6 right.
 
 | Pin | Function | Use |
 |-----|----------|-----|
-| 1 | +12 V | → transceiver VIN/VSUP (with pin 5) |
+| 1 | +12 V | same rail as pin 5 — use one *or* the other, never both |
 | 2 | GND | common ground (bus + transceiver + C3) |
 | 3 | LIN data | → transceiver LIN pin |
 | 4 | 2nd data / wake (usually idle) | leave unconnected |
-| 5 | +12 V (cleanest) | → transceiver VIN/VSUP |
+| 5 | +12 V (cleanest) | → transceiver VIN/VSUP — preferred |
 | 6 | NC | — |
 
 ## Board: ESP32-C3 Super Mini
