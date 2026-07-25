@@ -83,6 +83,8 @@ Notes:
 
 - C3 runs from its own USB-C supply; its `3V3` pin reads ~3.3 V. Nothing feeds the `5V` pin.
 - The C3 GND and the bus GND (pin 2) are tied together — verify continuity before trusting RX.
-- After the RXD divider, the level into GPIO20 stays ≤3.3 V (the C3 is not 5 V-tolerant).
-- With the bus active, RXD (post-divider) shows ~3.3 V idle high with brief dips (LIN traffic).
+- The level into GPIO20 stays ≤3.3 V (the C3 is not 5 V-tolerant). On the TJA1027 this
+  follows from tying VIO to `3V3`; on the TJA1021 measure RXD first and add a divider or
+  level shifter if it swings higher.
+- With the bus active, RXD shows ~3.3 V idle high with brief dips (LIN traffic).
 - Never connect N-Bus +12 V (pin 1/5) directly to any C3 or transceiver logic pin.
