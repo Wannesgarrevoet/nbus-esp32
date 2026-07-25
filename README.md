@@ -68,6 +68,11 @@ g++ -std=c++17 -I firmware test/test_parser.cpp firmware/NBusParser.cpp -o /tmp/
 
 After that, update wirelessly at `http://<device-ip>/update`.
 
+To wipe the stored Wi-Fi and MQTT settings, hold the **BOOT** button while applying
+power and keep holding it for 3 seconds — the LED blinks while counting, then flashes
+six times to confirm. Releasing early keeps the settings. A reset triggered over USB
+never erases anything, so opening a serial monitor is always safe.
+
 ## Status
 
 Reverse-engineering is functional for the core values (SoC, V, I, solar, starter).

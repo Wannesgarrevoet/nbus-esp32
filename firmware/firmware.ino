@@ -13,6 +13,7 @@
 #include <PubSubClient.h>    // knolleary
 #include <ArduinoJson.h>     // bblanchon (v7)
 #include <ElegantOTA.h>      // ayushsharma82
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 
 #include "Config.h"
@@ -100,19 +101,42 @@ void saveConfig() {
 // --------------------------------------------------------------------------
 void onSaveConfig() { g_shouldSaveConfig = true; }
 
+void eraseSettings() {
+  Serial.println(F("[setup] erasing settings"));
+  WiFiManager wm;
+  wm.resetSettings();
+  prefs.begin("nbus", false);
+  prefs.clear();
+  prefs.end();
+  for (int i = 0; i < 6; ++i) { ledWrite(true); delay(80); ledWrite(false); delay(80); }
+}
+
+// Wipe Wi-Fi + MQTT settings when the BOOT button is held at power-on.
+//
+// GPIO9 doubles as the boot strapping pin that the USB host drives via DTR, so a
+// serial terminal opening the port can pull it low a few hundred ms after the ROM
+// has already sampled it high. Two gates make that harmless: the erase only runs
+// after a true power-on reset (every USB-induced reset is excluded), and the pin
+// must stay low for NBUS_FACTORY_HOLD_MS — far longer than any DTR pulse.
 void maybeFactoryReset() {
-  // Hold the BOOT button at power-on to wipe Wi-Fi + MQTT settings.
+  if (esp_reset_reason() != ESP_RST_POWERON) return;
+
   pinMode(NBUS_SETUP_BTN_PIN, INPUT_PULLUP);
   delay(50);
-  if (digitalRead(NBUS_SETUP_BTN_PIN) == LOW) {
-    Serial.println(F("[setup] BOOT held — erasing settings"));
-    WiFiManager wm;
-    wm.resetSettings();
-    prefs.begin("nbus", false);
-    prefs.clear();
-    prefs.end();
-    for (int i = 0; i < 6; ++i) { ledWrite(true); delay(80); ledWrite(false); delay(80); }
+  if (digitalRead(NBUS_SETUP_BTN_PIN) != LOW) return;
+
+  Serial.println(F("[setup] BOOT held — keep holding to erase settings"));
+  const uint32_t start = millis();
+  while (digitalRead(NBUS_SETUP_BTN_PIN) == LOW) {
+    if (millis() - start >= NBUS_FACTORY_HOLD_MS) {
+      eraseSettings();
+      return;
+    }
+    ledWrite((((millis() - start) / 100) % 2) != 0);  // blink while counting
+    delay(10);
   }
+  ledWrite(false);
+  Serial.println(F("[setup] BOOT released early — settings kept"));
 }
 
 void startProvisioning() {

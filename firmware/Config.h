@@ -22,7 +22,12 @@
 // ---------------------------------------------------------------------------
 #define NBUS_LED_PIN     8      // on-board LED (active-low), used for heartbeat
 #define NBUS_LED_ACTIVE_LOW 1
-#define NBUS_SETUP_BTN_PIN 9    // BOOT button: hold at power-on to erase settings
+// BOOT button: hold at power-on to erase settings. GPIO9 is also the C3 boot
+// strapping pin, which the USB host drives via DTR over USB-Serial-JTAG — so a
+// terminal opening the port can pull it low. The erase is therefore gated on a
+// power-on reset plus a sustained hold; a DTR pulse satisfies neither.
+#define NBUS_SETUP_BTN_PIN 9
+#define NBUS_FACTORY_HOLD_MS 3000
 
 // ---------------------------------------------------------------------------
 // Wi-Fi provisioning portal
