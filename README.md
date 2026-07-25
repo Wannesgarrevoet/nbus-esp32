@@ -18,6 +18,9 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
 - Decodes LIN-TP frames from the NDS bus (node 0x85 = battery, 0x81 = solar charger)
 - Publishes SoC, battery voltage/current, cell voltages, solar voltage/current,
   starter-battery voltage over MQTT
+- Also decodes remaining energy (Wh), "quality" (SoH-like %) and nominal capacity (Ah) —
+  these three come from a cross-check against a BLE reader for the same battery and are
+  **not yet verified on our own bus**
 - Home Assistant MQTT auto-discovery (sensors appear automatically)
 - Wi-Fi + MQTT setup via **WiFiManager** captive portal (no credentials in the repo)
 - **Over-the-air updates** via a browser (ElegantOTA at `http://<device-ip>/update`)
@@ -84,6 +87,20 @@ never erases anything, so opening a serial monitor is always safe.
 Reverse-engineering is functional for the core values (SoC, V, I, solar, starter).
 A few registers (remaining Wh, runtime estimate, exact cell mapping) are still being
 mapped — contributions welcome.
+
+## Credits & related work
+
+[**ESP32-BLE-Reader-for-Buettner-Dometic-Tempra-TLB150-BMS**](https://github.com/MartinusTech/ESP32-BLE-Reader-for-Buettner-Dometic-Tempra-TLB150-BMS)
+by **MartinusTech** reads the same battery over its **BLE** interface rather than the
+wired N-Bus. Its telemetry frames carry the same node byte and the same parameter
+numbering, so the two protocols decode identically.
+
+That project's research resolved several things this one had open: the remaining-energy
+(0x36), quality (0x0E) and capacity (0x07) registers, the cell ordering behind 0x56/0x57,
+and the insight that **remaining runtime is computed, not transmitted** — the app derives
+it from remaining Wh divided by smoothed power. Credit for that work goes to MartinusTech.
+The register statuses in [`docs/NBUS_protocol_map.md`](docs/NBUS_protocol_map.md) mark
+which of those we have since seen on our own bus and which we have not.
 
 ## Disclaimer
 

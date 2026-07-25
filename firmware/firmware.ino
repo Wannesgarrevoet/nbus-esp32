@@ -233,6 +233,11 @@ void publishDiscovery() {
   publishDiscoverySensor("cell2_voltage",   "Battery cell 2 voltage",  bt.c_str(), "{{ value_json.cells[1] }}", "V", "voltage");
   publishDiscoverySensor("cell3_voltage",   "Battery cell 3 voltage",  bt.c_str(), "{{ value_json.cells[2] }}", "V", "voltage");
   publishDiscoverySensor("cell4_voltage",   "Battery cell 4 voltage",  bt.c_str(), "{{ value_json.cells[3] }}", "V", "voltage");
+  // Registers 0x36/0x0E/0x07 are decoded from a cross-check against a BLE reader for
+  // the same battery; they have not been observed on our own bus yet.
+  publishDiscoverySensor("battery_energy",   "Leisure battery energy remaining", bt.c_str(), "{{ value_json.energy }}",   "Wh", "energy_storage");
+  publishDiscoverySensor("battery_quality",  "Leisure battery quality",          bt.c_str(), "{{ value_json.quality }}",  "%",  "");
+  publishDiscoverySensor("battery_capacity", "Leisure battery capacity",         bt.c_str(), "{{ value_json.capacity }}", "Ah", "");
   publishDiscoverySensor("solar_voltage",   "Solar charger voltage",   st.c_str(), "{{ value_json.voltage }}", "V", "voltage");
   publishDiscoverySensor("solar_current",   "Solar charge current",    st.c_str(), "{{ value_json.current }}", "A", "current");
   publishDiscoverySensor("starter_voltage", "Starter battery voltage", rt.c_str(), "{{ value_json.voltage }}", "V", "voltage");
@@ -274,6 +279,9 @@ void publishState() {
     JsonDocument doc;
     if (s.batt_soc_valid)     doc["soc"]     = s.batt_soc;
     if (s.batt_voltage_valid) doc["voltage"] = roundf(s.batt_voltage * 100) / 100.0;
+    if (s.batt_wh_valid)       doc["energy"]   = s.batt_wh;
+    if (s.batt_quality_valid)  doc["quality"]  = s.batt_quality;
+    if (s.batt_capacity_valid) doc["capacity"] = s.batt_capacity_ah;
     if (s.batt_current_valid) {
       doc["current"] = roundf(s.batt_current * 100) / 100.0;
       doc["power"]   = roundf(s.batt_voltage * s.batt_current * 10) / 10.0;
