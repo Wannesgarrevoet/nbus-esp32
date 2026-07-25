@@ -14,8 +14,23 @@ Ford Nugget with a Büttner/Dometic NDS system (2× Tempra TLB150 battery + MPPT
   - pin 4 = 2nd data line / wake (mostly inactive)
   - pin 5 = +12 V (straight from the battery, most stable)
   - pin 6 = NC
-- Measurement setup: data via a voltage divider (988 Ω + 2×220 Ω → ~3.7 V) to the
-  logic analyzer, GND to pin 2.
+
+### How the bus is tapped
+
+The register map below was originally reverse-engineered with a **logic analyzer**
+hanging off pin 3 through a resistive divider (988 Ω + 2×220 Ω → ~3.7 V), with GND on
+pin 2. That was a bench measurement only — it is **not** how this firmware reads the bus.
+
+The firmware uses a **LIN transceiver** (TJA1027 preferred, TJA1021 works) which does the
+level conversion properly:
+
+- transceiver LIN pin → bus pin 3; VSUP → bus pin 1/5 (12 V); GND → bus pin 2
+- transceiver RXD → ESP32-C3 **GPIO20** (UART1 RX, `NBUS_RX_PIN`)
+- transceiver TXD **left unconnected** — the firmware never transmits (`NBUS_TX_PIN -1`)
+- the C3 runs from its **own USB supply**, not from the bus; both supplies share a ground
+
+No divider is involved on the TJA1027 (its VIO pin sets the RXD level to 3.3 V). See
+[`wiring.md`](wiring.md) for the full wiring.
 
 ## Transport layer (LIN-TP / diagnostic)
 
