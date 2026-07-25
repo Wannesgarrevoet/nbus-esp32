@@ -11,20 +11,21 @@ Pin numbering: clip down, gold contacts toward you → pin 1 left, pin 6 right.
 
 | Pin | Function | Use |
 |-----|----------|-----|
-| 1 | +12 V | → buck converter input (with pin 5) |
-| 2 | GND | common ground |
+| 1 | +12 V | → transceiver VIN/VSUP (with pin 5) |
+| 2 | GND | common ground (bus + transceiver + C3) |
 | 3 | LIN data | → transceiver LIN pin |
 | 4 | 2nd data / wake (usually idle) | leave unconnected |
-| 5 | +12 V (cleanest) | → buck converter input |
+| 5 | +12 V (cleanest) | → transceiver VIN/VSUP |
 | 6 | NC | — |
 
 ## Board: ESP32-C3 Super Mini
 
 This build targets an **ESP32-C3 Super Mini**. It has **no on-board buck** — only a
 linear LDO (5 V→3.3 V). Both its `5V` and `3V3` pins feed that LDO, which tolerates only
-a few volts above 5 V (≈6 V max).
+a few volts above 5 V (≈6 V max). Here the C3 is powered from its **own USB-C supply**,
+so nothing on the bus side ever reaches a board pin.
 
-> ⚠️ **Never put 12 V on any board pin.** The N-Bus 12 V must pass through the buck first.
+> ⚠️ **Never put 12 V on any board pin.** The N-Bus 12 V goes to the transceiver only.
 > 12 V on the C3's `5V` or `3V3` pin destroys the LDO instantly.
 
 The C3 has only two UARTs (UART0 + UART1) and no fixed "UART2/GPIO16". Because the C3's
@@ -34,14 +35,22 @@ the idle-high LIN line can't disturb boot.
 
 ## Power
 
+The ESP32-C3 is powered from **its own USB supply** (USB-C charger, power bank, or
+laptop) — *not* from the bus. The transceiver still takes its 12 V straight from the
+bus. The two supplies must share a **common ground**: without it the LIN RX signal has
+no reference and you will read garbage (or nothing).
+
 ```
-N-Bus pin 1/5 (+12 V) ──► 12 V→5 V buck ──► C3 "5V" pin (feeds on-board LDO → 3.3 V)
-N-Bus pin 2 (GND) ─────────────────────────► common GND (C3 + transceiver + buck)
+USB-C 5 V supply ─────────► C3 USB-C port (feeds on-board LDO → 3.3 V)
+
+N-Bus pin 1/5 (+12 V) ────► transceiver VIN / VSUP (8–24 V) — directly
+N-Bus pin 2 (GND) ────────► transceiver GND ──┬── C3 GND pin   ◄── COMMON GROUND (required)
 ```
 
-The 12 V from the bus is fine *as a source*; it just must pass through the buck. The
-transceiver's 12 V supply (VSUP/VBAT) is the **only** thing that takes the bus 12 V
-directly — that chip is rated for it. All logic pins stay at 3.3 V.
+Because the C3 is USB-powered, **no buck converter is needed** and **nothing feeds the
+C3 `5V` pin**. Never power the C3 from USB and the `5V` pin at the same time — pick one
+source (here: USB). The transceiver's VIN/VSUP is the only thing that takes bus 12 V
+directly; that chip is rated for it. All logic pins stay at 3.3 V.
 
 ## TJA1021 / TJA1027 LIN transceiver
 
@@ -51,7 +60,7 @@ Functional connections (ESP32-C3 Super Mini):
 | Transceiver | Connect to (C3 Super Mini) |
 |-------------|-----------|
 | VSUP / VBAT (12 V supply) | N-Bus +12 V (pin 1/5) — directly |
-| GND | common GND (pin 2) |
+| GND | common GND (pin 2) — **also tie to C3 GND pin** |
 | LIN | N-Bus data (pin 3) |
 | RXD (data out to MCU) | C3 **GPIO20** (UART1 RX) — any free non-strapping GPIO |
 | TXD (data in from MCU) | **leave unconnected** (read-only) |
@@ -72,6 +81,8 @@ Notes:
 
 ## Quick sanity check before powering the C3
 
-- Buck output measures ~5.0 V (and stays under 6 V — never 12 V on the `5V` pin).
-- With the bus active, RXD shows ~3.3 V idle high with brief dips (the LIN traffic).
+- C3 runs from its own USB-C supply; its `3V3` pin reads ~3.3 V. Nothing feeds the `5V` pin.
+- The C3 GND and the bus GND (pin 2) are tied together — verify continuity before trusting RX.
+- After the RXD divider, the level into GPIO20 stays ≤3.3 V (the C3 is not 5 V-tolerant).
+- With the bus active, RXD (post-divider) shows ~3.3 V idle high with brief dips (LIN traffic).
 - Never connect N-Bus +12 V (pin 1/5) directly to any C3 or transceiver logic pin.
