@@ -56,9 +56,10 @@ public:
 
   const NBusState& state() const { return state_; }
 
-  // LIN "enhanced" checksum over PID + data bytes (inverted sum with carry).
-  // Returns the expected checksum byte; compare against the frame's checksum.
-  static uint8_t enhancedChecksum(uint8_t pid, const uint8_t* data, size_t len);
+  // LIN "classic" checksum over the data bytes only (inverted sum with carry).
+  // Diagnostic frames (ID 0x3C/0x3D) always use classic, never enhanced — the PID is
+  // excluded from the sum. Returns the expected checksum byte.
+  static uint8_t classicChecksum(const uint8_t* data, size_t len);
 
 private:
   NBusState state_;

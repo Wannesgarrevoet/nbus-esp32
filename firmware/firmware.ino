@@ -19,8 +19,9 @@
 #include "Config.h"
 #include "NBusParser.h"
 
-// Uncomment to print decoded frames over USB serial for validation.
-// #define NBUS_DEBUG 1
+// Print raw frame windows and decoded registers over USB serial. Comment out once the
+// bus is fully mapped; the raw dump is what makes unknown registers visible.
+#define NBUS_DEBUG 1
 
 // --------------------------------------------------------------------------
 // Globals
@@ -31,6 +32,17 @@ Preferences      prefs;
 WiFiClient       wifiClient;
 PubSubClient     mqtt(wifiClient);
 WebServer        httpServer(80);
+
+// The portal runs non-blocking, so WiFiManager and its parameters must outlive
+// startProvisioning() — it keeps pointers to them and services them from loop().
+WiFiManager           wm;
+WiFiManagerParameter  pHost("host", "MQTT host", "", 64);
+WiFiManagerParameter  pPort("port", "MQTT port", "", 8);
+WiFiManagerParameter  pUser("user", "MQTT user", "", 48);
+WiFiManagerParameter  pPass("pass", "MQTT password", "", 48);
+WiFiManagerParameter  pBase("base", "Base topic", "", 32);
+WiFiManagerParameter  pOtaU("otau", "OTA user (optional)", "", 32);
+WiFiManagerParameter  pOtaP("otap", "OTA password (optional)", "", 32);
 
 struct MqttConfig {
   String host;
@@ -43,6 +55,8 @@ struct MqttConfig {
 } cfg;
 
 bool g_shouldSaveConfig = false;
+bool g_portalActive     = false;
+bool g_netServicesUp    = false;
 
 // Per-group last-seen timestamps for staleness.
 uint32_t g_lastBattMs    = 0;
@@ -99,11 +113,13 @@ void saveConfig() {
 // --------------------------------------------------------------------------
 // Wi-Fi provisioning
 // --------------------------------------------------------------------------
+bool mqttConnect();
+void onWifiUp();
+
 void onSaveConfig() { g_shouldSaveConfig = true; }
 
 void eraseSettings() {
   Serial.println(F("[setup] erasing settings"));
-  WiFiManager wm;
   wm.resetSettings();
   prefs.begin("nbus", false);
   prefs.clear();
@@ -139,21 +155,21 @@ void maybeFactoryReset() {
   Serial.println(F("[setup] BOOT released early — settings kept"));
 }
 
+// The portal never blocks: reading the bus is this device's primary job and must not
+// depend on Wi-Fi being provisioned. loop() drives the portal via handleProvisioning().
 void startProvisioning() {
-  WiFiManager wm;
-  wm.setSaveConfigCallback(onSaveConfig);
-  wm.setConfigPortalTimeout(NBUS_AP_TIMEOUT_S);
-
   char portBuf[8];
   snprintf(portBuf, sizeof portBuf, "%u", cfg.port);
+  pHost.setValue(cfg.host.c_str(), 64);
+  pPort.setValue(portBuf, 8);
+  pUser.setValue(cfg.user.c_str(), 48);
+  pPass.setValue(cfg.pass.c_str(), 48);
+  pBase.setValue(cfg.base.c_str(), 32);
+  pOtaU.setValue(cfg.otaUser.c_str(), 32);
+  pOtaP.setValue(cfg.otaPass.c_str(), 32);
 
-  WiFiManagerParameter pHost("host", "MQTT host", cfg.host.c_str(), 64);
-  WiFiManagerParameter pPort("port", "MQTT port", portBuf, 8);
-  WiFiManagerParameter pUser("user", "MQTT user", cfg.user.c_str(), 48);
-  WiFiManagerParameter pPass("pass", "MQTT password", cfg.pass.c_str(), 48);
-  WiFiManagerParameter pBase("base", "Base topic", cfg.base.c_str(), 32);
-  WiFiManagerParameter pOtaU("otau", "OTA user (optional)", cfg.otaUser.c_str(), 32);
-  WiFiManagerParameter pOtaP("otap", "OTA password (optional)", cfg.otaPass.c_str(), 32);
+  wm.setSaveConfigCallback(onSaveConfig);
+  wm.setConfigPortalBlocking(false);
   wm.addParameter(&pHost);
   wm.addParameter(&pPort);
   wm.addParameter(&pUser);
@@ -162,13 +178,17 @@ void startProvisioning() {
   wm.addParameter(&pOtaU);
   wm.addParameter(&pOtaP);
 
-  if (!wm.autoConnect(NBUS_AP_NAME)) {
-    Serial.println(F("[wifi] portal timed out — rebooting"));
-    delay(1000);
-    ESP.restart();
+  if (wm.autoConnect(NBUS_AP_NAME)) {
+    onWifiUp();
+  } else {
+    g_portalActive = true;
+    Serial.println(F("[wifi] not connected — config portal " NBUS_AP_NAME " open at 192.168.4.1"));
   }
+}
 
+void onWifiUp() {
   if (g_shouldSaveConfig) {
+    g_shouldSaveConfig = false;
     cfg.host = pHost.getValue();
     cfg.port = atoi(pPort.getValue());
     cfg.user = pUser.getValue();
@@ -183,6 +203,28 @@ void startProvisioning() {
   }
   Serial.print(F("[wifi] connected, IP "));
   Serial.println(WiFi.localIP());
+
+  // Deferred until now: the portal serves its own page on :80 while it is up.
+  if (!cfg.otaUser.isEmpty()) {
+    ElegantOTA.setAuth(cfg.otaUser.c_str(), cfg.otaPass.c_str());
+  }
+  httpServer.on("/", []() {
+    httpServer.send(200, "text/plain", "N-Bus camper bridge. OTA at /update");
+  });
+  ElegantOTA.begin(&httpServer);
+  httpServer.begin();
+  Serial.println(F("[ota] web server on :80 (/update)"));
+  g_netServicesUp = true;
+
+  mqttConnect();
+}
+
+void handleProvisioning() {
+  if (!g_portalActive) return;
+  if (wm.process()) {
+    g_portalActive = false;
+    onWifiUp();
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -328,6 +370,13 @@ void markFresh(uint8_t nad, uint8_t reg) {
 }
 
 void processFrameWindow(const uint8_t* buf, size_t len) {
+#ifdef NBUS_DEBUG
+  // Raw window dump: during bring-up this is what separates "nothing on the wire" from
+  // "bytes arrive but framing is off".
+  Serial.printf("[raw %2u]", (unsigned)len);
+  for (size_t i = 0; i < len; ++i) Serial.printf(" %02X", buf[i]);
+  Serial.println();
+#endif
   // A frame window (delimited by an idle gap) holds: [break 0x00?] 0x55 PID data... checksum.
   for (size_t i = 0; i + 1 < len; ++i) {
     if (buf[i] != 0x55) continue;
@@ -337,9 +386,9 @@ void processFrameWindow(const uint8_t* buf, size_t len) {
     if (len - dStart < 8) return;     // not enough data bytes yet
     const uint8_t* d = &buf[dStart];
 
-    // Optional checksum verification (enhanced checksum over PID + 8 data bytes).
+    // Optional checksum verification (classic checksum: data bytes only, PID excluded).
     if (len - dStart >= 9) {
-      uint8_t expect = NBusParser::enhancedChecksum(pid, d, 8);
+      uint8_t expect = NBusParser::classicChecksum(d, 8);
       if (expect != d[8]) {
 #ifdef NBUS_DEBUG
         Serial.printf("[lin] checksum mismatch reg=%02X exp=%02X got=%02X\n", d[3], expect, d[8]);
@@ -417,19 +466,6 @@ void setup() {
                 NBUS_UART_NUM, NBUS_RX_PIN, NBUS_BAUD);
 
   startProvisioning();
-
-  // OTA web server.
-  if (!cfg.otaUser.isEmpty()) {
-    ElegantOTA.setAuth(cfg.otaUser.c_str(), cfg.otaPass.c_str());
-  }
-  httpServer.on("/", []() {
-    httpServer.send(200, "text/plain", "N-Bus camper bridge. OTA at /update");
-  });
-  ElegantOTA.begin(&httpServer);
-  httpServer.begin();
-  Serial.println(F("[ota] web server on :80 (/update)"));
-
-  mqttConnect();
   watchdogInit();
 }
 
@@ -437,13 +473,17 @@ void loop() {
   esp_task_wdt_reset();
 
   readLin();
-  httpServer.handleClient();
-  ElegantOTA.loop();
+  handleProvisioning();
+  if (g_netServicesUp) {
+    httpServer.handleClient();
+    ElegantOTA.loop();
+  }
 
   // MQTT keepalive + non-blocking reconnect.
   if (mqtt.connected()) {
     mqtt.loop();
-  } else if (!cfg.host.isEmpty() && (millis() - g_lastMqttTryMs) > NBUS_MQTT_RETRY_MS) {
+  } else if (WiFi.status() == WL_CONNECTED && !cfg.host.isEmpty() &&
+             (millis() - g_lastMqttTryMs) > NBUS_MQTT_RETRY_MS) {
     g_lastMqttTryMs = millis();
     if (!mqttConnect()) {
       if (++g_mqttFailCount >= 60) {  // ~5 min of failures → reboot

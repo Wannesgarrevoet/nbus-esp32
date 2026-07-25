@@ -38,18 +38,18 @@ bool NBusParser::decodeBattery(uint8_t reg, const uint8_t* d) {
       state_.batt_soc_valid = true;
       return true;
 
-    case 0x0E:  // d0 → "quality" % (SoH-like). Cross-confirmed over BLE; verify on bus.
+    case 0x0E:  // d0 → "quality" % (SoH-like)
       state_.batt_quality = d[0];
       state_.batt_quality_valid = true;
       return true;
 
-    case 0x36:  // Wh Wl → remaining energy (big-endian u16). Cross-confirmed over BLE.
+    case 0x36:  // Wh Wl → remaining energy (big-endian u16)
       state_.batt_wh = nbus_u16(d[0], d[1]);
       state_.batt_wh_valid = true;
       return true;
 
-    case 0x07:  // nominal capacity ≈150 Ah. Layout provisional (BLE), verify on bus.
-      state_.batt_capacity_ah = nbus_u16(d[0], d[1]);
+    case 0x07:  // nominal capacity (150 Ah) in the low half: 00 00 00 96
+      state_.batt_capacity_ah = nbus_u16(d[2], d[3]);
       state_.batt_capacity_valid = true;
       return true;
 
@@ -90,8 +90,8 @@ bool NBusParser::decodeSolar(uint8_t reg, const uint8_t* d) {
   }
 }
 
-uint8_t NBusParser::enhancedChecksum(uint8_t pid, const uint8_t* data, size_t len) {
-  uint16_t sum = pid;
+uint8_t NBusParser::classicChecksum(const uint8_t* data, size_t len) {
+  uint16_t sum = 0;
   for (size_t i = 0; i < len; ++i) {
     sum += data[i];
     if (sum > 0xFF) sum -= 0xFF;  // carry wrap

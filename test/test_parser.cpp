@@ -116,12 +116,45 @@ int main() {
     check_int("v9 batt_quality", p.state().batt_quality, 99);
   }
 
-  // --- Vector 10: nominal capacity Ah (reg 0x07, big-endian u16) — layout provisional ---
+  // --- Vector 10: nominal capacity Ah (reg 0x07) — verbatim from a live capture ---
   {
     NBusParser p;
-    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x07, 0x00, 0x96, 0xFF, 0xFF};
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x07, 0x00, 0x00, 0x00, 0x96};
     check_true("v10 accepted", p.feedResponse(f, sizeof f));
     check_int("v10 batt_capacity_ah", p.state().batt_capacity_ah, 150);
+  }
+
+  // --- Vectors 11-13: frames captured verbatim off our own bus ---
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x02, 0x05, 0x2D, 0x83, 0x7F};
+    check_true("v11 accepted", p.feedResponse(f, sizeof f));
+    check_near("v11 batt_voltage", p.state().batt_voltage, 13.25f);
+    check_near("v11 batt_current", p.state().batt_current, -8.95f);
+  }
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x85, 0x06, 0xF4, 0x36, 0x06, 0xEB, 0xFF, 0xFF};
+    check_true("v12 accepted", p.feedResponse(f, sizeof f));
+    check_int("v12 batt_wh", p.state().batt_wh, 1771);
+  }
+  {
+    NBusParser p;
+    const uint8_t f[] = {0x81, 0x06, 0xF4, 0x1B, 0x00, 0x01, 0xFF, 0xFF};
+    check_true("v13 unknown solar reg ignored", !p.feedResponse(f, sizeof f));
+  }
+
+  // --- Checksum: diagnostic frames use the LIN *classic* checksum (data only, no PID).
+  // These three are observed frame+checksum pairs; the enhanced variant fails all of them.
+  {
+    const uint8_t f1[] = {0x85, 0x06, 0xF4, 0x02, 0x05, 0x2D, 0x83, 0x7F};
+    check_int("cksum v+i", NBusParser::classicChecksum(f1, sizeof f1), 0x48);
+
+    const uint8_t f2[] = {0x85, 0x06, 0xF4, 0x07, 0x00, 0x00, 0x00, 0x96};
+    check_int("cksum capacity", NBusParser::classicChecksum(f2, sizeof f2), 0xE1);
+
+    const uint8_t f3[] = {0x81, 0x06, 0xF4, 0x1B, 0x00, 0x01, 0xFF, 0xFF};
+    check_int("cksum solar 1B", NBusParser::classicChecksum(f3, sizeof f3), 0x67);
   }
 
   // --- Negative cases: frames that must be rejected ---

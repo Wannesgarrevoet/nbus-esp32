@@ -46,6 +46,10 @@ Frame payload (8 data bytes): `NAD  PCI  SID  reg  d0 d1 d2 d3` + checksum.
 - **reg** = parameter index; the node rotates through its parameters, 1 per response
 - **d0..d3** = value (FF = padding/unused)
 
+The trailing checksum is the LIN **classic** checksum — inverted sum-with-carry over the
+8 data bytes, *excluding* the PID. (The enhanced variant, which includes the PID, is
+never used on diagnostic IDs; verified on this bus.)
+
 ## Nodes
 
 | NAD | Device | Serial |
@@ -61,11 +65,11 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | reg | bytes | meaning | unit | status |
 |-----|-------|---------|------|--------|
 | 0x02 | `Vh Vl Ih Il` | battery voltage + battery current | V=0.01 V; I=0.01 A, **bit15=1 → discharging**; bit15=0 → charging (LIKELY, BLE) | CONFIRMED (discharge only) |
-| 0x07 | `Ah…` | nominal capacity (150 Ah) | Ah | LIKELY (BLE) — verify layout on bus |
+| 0x07 | `00 00 Ah Al` | nominal capacity (150 Ah) | Ah, big-endian 16-bit in `d2 d3` | CONFIRMED |
 | 0x0B | `b0` | State of Charge | % (0x4B = 75%) | CONFIRMED |
-| 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | LIKELY (BLE) — verify on bus |
+| 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | CONFIRMED |
 | 0x34 | `H1h H1l H2h H2l` | H1 non-FFFF only while charging, H2 non-FFFF only while discharging; meaning unknown | ? | UNRESOLVED (also open in BLE) |
-| 0x36 | `Wh Wl (FF FF)` | remaining energy | Wh, big-endian 16-bit | LIKELY (BLE) — matches app's ~1487/1479 Wh; verify on bus |
+| 0x36 | `Wh Wl (FF FF)` | remaining energy | Wh, big-endian 16-bit | CONFIRMED |
 | 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x54 | ASCII | serial-number fragment ("KAA") | text | CONFIRMED |
@@ -96,9 +100,6 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 
 ## Still to determine
 
-- Confirm 0x36 (Wh), 0x0E (quality) and 0x07 (capacity) are actually emitted on the
-  battery's **N-Bus** node 0x85 (they are confirmed over BLE for the same battery; the
-  parameter numbering is shared, but we haven't yet captured them on the wire).
 - Meaning of 0x34's H1/H2 fields (still open in the BLE project too).
 - Behaviour while charging (positive battery current): the BLE cross-check says bit15=0,
   but we have never captured a charging frame ourselves. Needs a daytime capture.
