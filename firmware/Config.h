@@ -34,6 +34,8 @@
 // ---------------------------------------------------------------------------
 #define NBUS_AP_NAME    "NBus-Setup"
 #define NBUS_AP_TIMEOUT_S  180  // portal idle timeout before reboot/retry
+// Cap on the saved-AP connect attempt, the only blocking step left in setup().
+#define NBUS_WIFI_CONNECT_TIMEOUT_S 15
 
 // ---------------------------------------------------------------------------
 // MQTT defaults (overridable in the WiFiManager portal, persisted to NVS)

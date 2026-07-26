@@ -155,6 +155,41 @@ void maybeFactoryReset() {
   Serial.println(F("[setup] BOOT released early — settings kept"));
 }
 
+// The ESP's disconnect reason is the only thing that separates a wrong passphrase
+// (reason 15, 4-way handshake timeout) from an AP that refuses or drops us.
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    Serial.printf("[wifi] disconnected, reason %d\n", (int)info.wifi_sta_disconnected.reason);
+  }
+}
+
+// Lists what the radio can actually see. The C3 is 2.4 GHz only, so an AP that is
+// missing here but visible on a phone is almost always 5 GHz.
+const char* authModeName(wifi_auth_mode_t m) {
+  switch (m) {
+    case WIFI_AUTH_OPEN:            return "open";
+    case WIFI_AUTH_WEP:             return "WEP";
+    case WIFI_AUTH_WPA_PSK:         return "WPA";
+    case WIFI_AUTH_WPA2_PSK:        return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-ent";
+    case WIFI_AUTH_WPA3_PSK:        return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3";
+    default:                        return "other";
+  }
+}
+
+void logVisibleNetworks() {
+  Serial.printf("[wifi] stored SSID '%s'\n", wm.getWiFiSSID().c_str());
+  const int n = WiFi.scanNetworks();
+  Serial.printf("[wifi] %d networks visible (2.4 GHz only):\n", n);
+  for (int i = 0; i < n; ++i) {
+    Serial.printf("  %-28s ch%-3d %4d dBm %s\n", WiFi.SSID(i).c_str(), WiFi.channel(i),
+                  WiFi.RSSI(i), authModeName(WiFi.encryptionType(i)));
+  }
+  WiFi.scanDelete();
+}
+
 // The portal never blocks: reading the bus is this device's primary job and must not
 // depend on Wi-Fi being provisioned. loop() drives the portal via handleProvisioning().
 void startProvisioning() {
@@ -170,6 +205,9 @@ void startProvisioning() {
 
   wm.setSaveConfigCallback(onSaveConfig);
   wm.setConfigPortalBlocking(false);
+  // Bounds the one blocking step left in autoConnect(): the attempt on the saved AP.
+  // Without it WiFiManager waits on the ESP's own result, which took 60 s on a failure.
+  wm.setConnectTimeout(NBUS_WIFI_CONNECT_TIMEOUT_S);
   wm.addParameter(&pHost);
   wm.addParameter(&pPort);
   wm.addParameter(&pUser);
@@ -182,7 +220,9 @@ void startProvisioning() {
     onWifiUp();
   } else {
     g_portalActive = true;
-    Serial.println(F("[wifi] not connected — config portal " NBUS_AP_NAME " open at 192.168.4.1"));
+    Serial.printf("[wifi] connect failed (status %d) - portal %s open at 192.168.4.1\n",
+                  (int)WiFi.status(), NBUS_AP_NAME);
+    logVisibleNetworks();
   }
 }
 
@@ -223,6 +263,7 @@ void handleProvisioning() {
   if (!g_portalActive) return;
   if (wm.process()) {
     g_portalActive = false;
+    wm.stopConfigPortal();  // frees port 80 before the OTA server binds to it
     onWifiUp();
   }
 }
@@ -275,8 +316,6 @@ void publishDiscovery() {
   publishDiscoverySensor("cell2_voltage",   "Battery cell 2 voltage",  bt.c_str(), "{{ value_json.cells[1] }}", "V", "voltage");
   publishDiscoverySensor("cell3_voltage",   "Battery cell 3 voltage",  bt.c_str(), "{{ value_json.cells[2] }}", "V", "voltage");
   publishDiscoverySensor("cell4_voltage",   "Battery cell 4 voltage",  bt.c_str(), "{{ value_json.cells[3] }}", "V", "voltage");
-  // Registers 0x36/0x0E/0x07 are decoded from a cross-check against a BLE reader for
-  // the same battery; they have not been observed on our own bus yet.
   publishDiscoverySensor("battery_energy",   "Leisure battery energy remaining", bt.c_str(), "{{ value_json.energy }}",   "Wh", "energy_storage");
   publishDiscoverySensor("battery_quality",  "Leisure battery quality",          bt.c_str(), "{{ value_json.quality }}",  "%",  "");
   publishDiscoverySensor("battery_capacity", "Leisure battery capacity",         bt.c_str(), "{{ value_json.capacity }}", "Ah", "");
@@ -465,6 +504,7 @@ void setup() {
   Serial.printf("[lin] UART%d RX=GPIO%d @ %d 8N1 (read-only)\n",
                 NBUS_UART_NUM, NBUS_RX_PIN, NBUS_BAUD);
 
+  WiFi.onEvent(onWifiEvent);
   startProvisioning();
   watchdogInit();
 }
