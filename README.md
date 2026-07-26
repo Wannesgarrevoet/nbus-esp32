@@ -22,6 +22,9 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
   these three come from a cross-check against a BLE reader for the same battery and are
   **not yet verified on our own bus**
 - Home Assistant MQTT auto-discovery (sensors appear automatically)
+- Republishes registers it cannot decode to `<base>/reg/<NAD>/<REG>` as raw hex, and
+  gives a hand-picked few of them their own entities named after the register address —
+  so a value that only matters the day it changes ends up in the recorder
 - Wi-Fi + MQTT setup via **WiFiManager** captive portal (no credentials in the repo)
 - **Over-the-air updates** via a browser (ElegantOTA at `http://<device-ip>/update`)
 - Reusable, platform-independent parser (`NBusParser`) with host-side unit tests
@@ -76,6 +79,10 @@ g++ -std=c++17 -I firmware test/test_parser.cpp firmware/NBusParser.cpp -o /tmp/
 4. The device reboots, connects, and Home Assistant discovers the sensors.
 
 After that, update wirelessly at `http://<device-ip>/update`.
+
+No YAML is needed for any of the sensors, including the raw register ones. If you are
+using those to catch a rare fault, raise `recorder.purge_keep_days` first: the default
+keeps ten days of history, which is easily shorter than the interval between events.
 
 To wipe the stored Wi-Fi and MQTT settings, hold the **BOOT** button while applying
 power and keep holding it for 3 seconds — the LED blinks while counting, then flashes

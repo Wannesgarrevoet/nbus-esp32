@@ -485,7 +485,7 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   doc["name"]         = name;
   doc["uniq_id"]      = String(NBUS_DEVICE_ID) + "_" + key;
   doc["stat_t"]       = stateTopic;
-  doc["val_tpl"]      = valTpl;
+  if (valTpl && valTpl[0]) doc["val_tpl"]    = valTpl;
   if (unit && unit[0])   doc["unit_of_meas"] = unit;
   if (devCla && devCla[0]) doc["dev_cla"]    = devCla;
   if (stateCla && stateCla[0]) doc["stat_cla"] = stateCla;
@@ -496,6 +496,61 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   String payload;
   serializeJson(doc, payload);
   mqtt.publish(topic.c_str(), payload.c_str(), true);
+}
+
+// Discovery for a hand-picked set of registers the parser does not decode.
+//
+// The mirror republishes every undecoded register, but most of them never move and would
+// only clutter Home Assistant. The ones here are those whose *history* is the evidence: a
+// bitmap that reads zero today and non-zero for two seconds during the fault proves
+// nothing unless something recorded when it flipped, and a retained MQTT message holds one
+// value, not a history. Getting them into the recorder is the whole point.
+//
+// Naming them after their address rather than a guess is what keeps this honest — the
+// entity claims a register, not a meaning. That is also why an empty template leaves the
+// payload as the raw hex string: no unit, no state class, nothing to mislead.
+struct RegSensor {
+  const char* key;
+  uint8_t     nad;
+  uint8_t     reg;
+  const char* name;
+  const char* valTpl;    // "" ⇒ publish the eight hex characters unchanged
+  const char* unit;
+  const char* stateCla;
+};
+
+const RegSensor kRegSensors[] = {
+  // Two 16-bit fields, both 270 in every capture so far. The hypothesis is two temperature
+  // sensors at 27.0 °C; a sustained load should make a FET or shunt sensor climb away from
+  // a cell sensor, which is what splits them. Read unsigned — a reading near 6500 in a
+  // frost would mean the encoding is two's complement.
+  { "reg_85_90_a", 0x85, 0x90, "Battery 0x90 field A", "{{ value[0:4] | int(base=16) / 10 }}", "°C", "measurement" },
+  { "reg_85_90_b", 0x85, 0x90, "Battery 0x90 field B", "{{ value[4:8] | int(base=16) / 10 }}", "°C", "measurement" },
+
+  // Alarm-bitmap candidates: all zero on a healthy bus, which is indistinguishable from
+  // "unused" until one of them flips.
+  { "reg_85_c0", 0x85, 0xC0, "Battery 0xC0 raw", "", "", "" },
+  { "reg_85_f1", 0x85, 0xF1, "Battery 0xF1 raw", "", "", "" },
+  { "reg_85_f2", 0x85, 0xF2, "Battery 0xF2 raw", "", "", "" },
+  { "reg_81_c0", 0x81, 0xC0, "Solar 0xC0 raw",   "", "", "" },
+  { "reg_81_f0", 0x81, 0xF0, "Solar 0xF0 raw",   "", "", "" },
+  { "reg_81_f1", 0x81, 0xF1, "Solar 0xF1 raw",   "", "", "" },
+
+  // Recorded as a constant 730 for as long as captures were 5.5 minutes long; the first
+  // day of real history put it at 740. Candidate cycle count.
+  { "reg_85_0c", 0x85, 0x0C, "Battery 0x0C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+
+  // Both move, neither follows anything instantaneous; 0x11 lags the output badly.
+  { "reg_81_11", 0x81, 0x11, "Solar 0x11 value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+  { "reg_81_1c", 0x81, 0x1C, "Solar 0x1C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+};
+
+void publishRegDiscovery() {
+  for (const auto& r : kRegSensors) {
+    char topic[64];
+    snprintf(topic, sizeof(topic), "%s/reg/%02X/%02X", cfg.base.c_str(), r.nad, r.reg);
+    publishDiscoverySensor(r.key, r.name, topic, r.valTpl, r.unit, "", r.stateCla);
+  }
 }
 
 void publishDiscovery() {
@@ -527,6 +582,7 @@ void publishDiscovery() {
   publishDiscoverySensor("solar_voltage",   "Solar charger voltage",   st.c_str(), "{{ value_json.voltage }}", "V", "voltage");
   publishDiscoverySensor("solar_current",   "Solar charge current",    st.c_str(), "{{ value_json.current }}", "A", "current");
   publishDiscoverySensor("starter_voltage", "Starter battery voltage", rt.c_str(), "{{ value_json.voltage }}", "V", "voltage");
+  publishRegDiscovery();
   Serial.println(F("[mqtt] discovery published"));
 }
 
