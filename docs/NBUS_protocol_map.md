@@ -69,14 +69,14 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x0B | `b0` | State of Charge | % (0x4B = 75%) | CONFIRMED |
 | 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | CONFIRMED |
 | 0x34 | `H1h H1l H2h H2l` | H1 = time to full, H2 = time to empty; the inactive one reads FFFF | minutes, big-endian 16-bit | CONFIRMED (both halves) |
-| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging | Wh, big-endian 16-bit | CONFIRMED (direction); unit ~1 Wh/count |
+| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging | **1 Wh per count**, big-endian 16-bit | CONFIRMED (direction and unit) |
 | 0x36 | `Wh Wl (FF FF)` | remaining energy — the gauge's *estimate*, revised on load changes, not a coulomb integral | Wh, big-endian 16-bit | CONFIRMED |
 | 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x54 | `idx` + ASCII | serial-number fragment (index 0x0F, "KAA") | text | CONFIRMED |
 | 0x55 | `idx` + `** ** **` | same index byte as 0x54; likely the numeric part of the serial | ? | LIKELY |
-| 0x90 | `01 0E 01 0E` | two identical 16-bit values of 270 → probably 2 temperature sensors at 27.0 °C | 0.1 °C? | UNCERTAIN |
-| 0x0C | `02 Ex FF FF` | a slow counter, not a constant: 730 across every capture up to 2026-07-26, then 740 once Home Assistant started recording it. Candidate cycle count | ? | LIKELY (monotonic counter) |
+| 0x90 | `01 0E 01 0E` | two identical 16-bit values of 270. Read as 2 temperature sensors at 27.0 °C, but both held exactly 270 through a 504 Wh charge at up to 49.7 A — a live sensor would have moved | 0.1 °C? | DOUBTED (looks like a constant) |
+| 0x0C | `02 Ex FF FF` | not a constant and not a counter: sits on a multiple of 10, dithers one step either way, and the centre rises with state of charge (740 at 50 %, 780 at 73 %) | ? | UNRESOLVED |
 | 0x60 / 0xA0 / 0xA1 | constant | `60 00 01 00` / `00 05 00 08` / `04 02 02 08` — never move; look like model/version/date identity | — | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `00 02 00 00` | constant 2 | — | UNRESOLVED |
@@ -208,23 +208,53 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
 
 ## Still to determine
 
-- **The unit of the 0x35 counters.** Direction is settled, and the first timestamped
-  capture measured 1.05 Wh across one clean inter-increment interval. Confirming 1 Wh/count
-  needs a capture under sustained load, where increments come often enough to average.
-- **The exact full-capacity figure the gauge uses for 0x34 H1.** Our four samples imply
-  1932 ± 60 Wh against a nominal 1920 Wh. Whether it uses the nominal figure or a learned
-  one would show up as drift in that number as the battery ages.
 - Whether 0xC0 / 0xF0 / 0xF1 / 0xF2 really are alarm bitmaps. They are all zero on a
   healthy bus, which is exactly what an alarm register looks like when nothing is wrong —
   and also exactly what an unused register looks like. **A capture taken during a power
   loss would separate the two**, which makes them worth publishing to MQTT even unnamed.
-- **What 0x0C counts, and how fast.** It read 730 in every capture and so was written down
-  as a constant; the first day of recorded history put it at 740. Ten counts is the useful
-  number here — if they are charge cycles the battery has not done ten of those, so either
-  the step is not one cycle or the register counts something else entirely. Only a longer
-  trend against known charge activity settles it. Worth remembering as a method: a 5.5
-  minute ring cannot distinguish a constant from a counter, and three captures on three
-  days looked identical because the sampling was the problem, not the register.
+  They stayed zero throughout the 2026-07-26 drive, including engine cranking, so they are
+  at least not set by ordinary events.
+- **What 0x0C is.** Not a cycle count, and not monotonic — see the drive capture below.
+  It sits on a multiple of 10, dithers by one step, and the centre climbs with state of
+  charge. That rules out the counter reading it was given the same day, and leaves an
+  analogue quantity quantised to 10 units. Correlating its centre against SoC, remaining
+  Wh and pack voltage over a full discharge-to-recharge cycle is the next step.
+- Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
+  cruder SoC estimate alongside the battery's coulomb-counted 56 %.
+- Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
+  project; the values themselves we do see on our bus.
+
+> **The drive capture, 2026-07-26 20:45–22:45.** Two hours of driving, recorded in Home
+> Assistant rather than the ring: charging peaked at **49.7 A**, SoC went 50 → 73 %, and
+> the alternator held the starter battery at up to 14.73 V (11.85 V while cranking).
+> Three questions closed and one hypothesis broke.
+>
+> **0x35 is 1 Wh per count — settled.** Trapezoidal integration of published power over
+> the 119-minute window gives **505.6 Wh** of charge against a 0x35 charge-counter delta
+> of **+504**, and **−25.4 Wh** of discharge against a discharge-counter delta of **+26**.
+> That is 0.3 % on the charge side over 504 counts, which retires the earlier single-
+> interval estimate of 1.05 Wh.
+>
+> **The 0x34 H1 full-capacity figure is ~2033 Wh**, mean of 86 samples with a standard
+> deviation of 24 Wh (1.2 %), taken across remaining energies from 988 to 1490 Wh. That
+> it stays flat across that range is the real result: the gauge is dividing by a fixed
+> figure, not a sliding one. The figure is **6 % above the 1920 Wh nominal**, and it
+> inherits whatever bias 0x36 carries, since 0x36 is the numerator and is itself an
+> estimate.
+>
+> **0x90 did not move — evidence against the temperature reading.** Both fields held
+> `01 0E` exactly, through a 504 Wh charge at up to 49.7 A, for two hours. A charge that
+> size puts on the order of 15 Wh of loss into the pack, which should be a few degrees
+> even across a 150 Ah thermal mass, and the field resolves to 0.1 °C. A real temperature
+> sensor would have twitched. Treat 27.0 °C as a configured constant until something
+> makes it move.
+>
+> **0x0C reverses.** It stepped 740 → 750 → 760 → 770 → 780 over the drive, but between
+> every step it fell back one step and climbed again, and it was still oscillating
+> 770 ↔ 780 half an hour after the engine stopped and the charge counter had frozen. It
+> is therefore not a counter of anything. Recorded here as a caution: it was written up
+> as a monotonic counter earlier the same day on the strength of two readings, 730 and
+> 740, taken hours apart. Two samples of a dithering value look exactly like a counter.
 - Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
   cruder SoC estimate alongside the battery's coulomb-counted 56 %.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
