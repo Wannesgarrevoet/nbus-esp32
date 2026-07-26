@@ -11,6 +11,10 @@
 # fault is worthless unless something wrote down when it flipped. So they get sensors
 # here, by hand, with names that describe the address rather than a guessed meaning.
 #
+# The repeated `device:` block carries the same identifier the firmware puts in its
+# discovery payloads, which files these under the existing NBus Camper device instead of
+# leaving them loose in the entity list. It needs unique_id to be set, which it is.
+#
 # Paste into configuration.yaml (merge under an existing `mqtt:` key if there is one)
 # and restart Home Assistant.
 #
@@ -31,6 +35,9 @@ mqtt:
       state_class: measurement
       availability_topic: "nbus/status"
       value_template: "{{ value[0:4] | int(base=16) / 10 }}"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus battery 0x90 field B"
       state_topic: "nbus/reg/85/90"
@@ -39,6 +46,9 @@ mqtt:
       state_class: measurement
       availability_topic: "nbus/status"
       value_template: "{{ value[4:8] | int(base=16) / 10 }}"
+      device:
+        identifiers:
+          - nbus_camper
 
     # --- Alarm-bitmap candidates ------------------------------------------------------
     # All-zero on a healthy bus, which is indistinguishable from "unused" until one of
@@ -47,40 +57,62 @@ mqtt:
       state_topic: "nbus/reg/85/C0"
       unique_id: nbus_reg_85_c0
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus battery 0xF1 raw"
       state_topic: "nbus/reg/85/F1"
       unique_id: nbus_reg_85_f1
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus battery 0xF2 raw"
       state_topic: "nbus/reg/85/F2"
       unique_id: nbus_reg_85_f2
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus solar 0xC0 raw"
       state_topic: "nbus/reg/81/C0"
       unique_id: nbus_reg_81_c0
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus solar 0xF0 raw"
       state_topic: "nbus/reg/81/F0"
       unique_id: nbus_reg_81_f0
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus solar 0xF1 raw"
       state_topic: "nbus/reg/81/F1"
       unique_id: nbus_reg_81_f1
       availability_topic: "nbus/status"
+      device:
+        identifiers:
+          - nbus_camper
 
-    # --- Battery 0x0C: constant 730, candidate cycle count ----------------------------
-    # If it is a cycle count it should tick up over weeks, which only a long trend shows.
+    # --- Battery 0x0C: a slow counter, candidate cycle count --------------------------
+    # Recorded as a constant 730 until this sensor existed; the first day of history put
+    # it at 740. What the step means is still open, and only a long trend answers it.
     - name: "NBus battery 0x0C value"
       state_topic: "nbus/reg/85/0C"
       unique_id: nbus_reg_85_0c
       state_class: measurement
       availability_topic: "nbus/status"
       value_template: "{{ value[0:4] | int(base=16) }}"
+      device:
+        identifiers:
+          - nbus_camper
 
     # --- Solar 0x11 and 0x1C ----------------------------------------------------------
     # Both move but neither tracks anything instantaneous; 0x11 lags the output badly.
@@ -91,6 +123,9 @@ mqtt:
       state_class: measurement
       availability_topic: "nbus/status"
       value_template: "{{ value[0:4] | int(base=16) }}"
+      device:
+        identifiers:
+          - nbus_camper
 
     - name: "NBus solar 0x1C value"
       state_topic: "nbus/reg/81/1C"
@@ -98,3 +133,6 @@ mqtt:
       state_class: measurement
       availability_topic: "nbus/status"
       value_template: "{{ value[0:4] | int(base=16) }}"
+      device:
+        identifiers:
+          - nbus_camper

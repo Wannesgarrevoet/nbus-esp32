@@ -76,7 +76,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x54 | `idx` + ASCII | serial-number fragment (index 0x0F, "KAA") | text | CONFIRMED |
 | 0x55 | `idx` + `** ** **` | same index byte as 0x54; likely the numeric part of the serial | ? | LIKELY |
 | 0x90 | `01 0E 01 0E` | two identical 16-bit values of 270 → probably 2 temperature sensors at 27.0 °C | 0.1 °C? | UNCERTAIN |
-| 0x0C | `02 DA FF FF` | constant 730; candidate cycle count | ? | UNRESOLVED |
+| 0x0C | `02 Ex FF FF` | a slow counter, not a constant: 730 across every capture up to 2026-07-26, then 740 once Home Assistant started recording it. Candidate cycle count | ? | LIKELY (monotonic counter) |
 | 0x60 / 0xA0 / 0xA1 | constant | `60 00 01 00` / `00 05 00 08` / `04 02 02 08` — never move; look like model/version/date identity | — | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `00 02 00 00` | constant 2 | — | UNRESOLVED |
@@ -218,6 +218,13 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
   healthy bus, which is exactly what an alarm register looks like when nothing is wrong —
   and also exactly what an unused register looks like. **A capture taken during a power
   loss would separate the two**, which makes them worth publishing to MQTT even unnamed.
+- **What 0x0C counts, and how fast.** It read 730 in every capture and so was written down
+  as a constant; the first day of recorded history put it at 740. Ten counts is the useful
+  number here — if they are charge cycles the battery has not done ten of those, so either
+  the step is not one cycle or the register counts something else entirely. Only a longer
+  trend against known charge activity settles it. Worth remembering as a method: a 5.5
+  minute ring cannot distinguish a constant from a counter, and three captures on three
+  days looked identical because the sampling was the problem, not the register.
 - Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
   cruder SoC estimate alongside the battery's coulomb-counted 56 %.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
