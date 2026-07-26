@@ -410,7 +410,8 @@ void addDevice(JsonObject dev) {
 }
 
 void publishDiscoverySensor(const char* key, const char* name, const char* stateTopic,
-                            const char* valTpl, const char* unit, const char* devCla) {
+                            const char* valTpl, const char* unit, const char* devCla,
+                            const char* stateCla = "measurement") {
   JsonDocument doc;
   doc["name"]         = name;
   doc["uniq_id"]      = String(NBUS_DEVICE_ID) + "_" + key;
@@ -418,7 +419,7 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   doc["val_tpl"]      = valTpl;
   if (unit && unit[0])   doc["unit_of_meas"] = unit;
   if (devCla && devCla[0]) doc["dev_cla"]    = devCla;
-  doc["stat_cla"]     = "measurement";
+  if (stateCla && stateCla[0]) doc["stat_cla"] = stateCla;
   doc["avty_t"]       = statusTopic();
   addDevice(doc["dev"].to<JsonObject>());
 
@@ -444,6 +445,16 @@ void publishDiscovery() {
   publishDiscoverySensor("battery_energy",   "Leisure battery energy remaining", bt.c_str(), "{{ value_json.energy }}",   "Wh", "energy_storage");
   publishDiscoverySensor("battery_quality",  "Leisure battery quality",          bt.c_str(), "{{ value_json.quality }}",  "%",  "");
   publishDiscoverySensor("battery_capacity", "Leisure battery capacity",         bt.c_str(), "{{ value_json.capacity }}", "Ah", "");
+  // The battery reports its own runtime estimate in register 0x34; it is not derived
+  // here. Only the half matching the current direction of travel is ever published.
+  publishDiscoverySensor("battery_to_empty", "Leisure battery time to empty", bt.c_str(), "{{ value_json.to_empty }}", "min", "duration");
+  publishDiscoverySensor("battery_to_full",  "Leisure battery time to full",  bt.c_str(), "{{ value_json.to_full }}",  "min", "duration");
+  // Lifetime counters, so total_increasing rather than measurement: HA must not treat a
+  // counter reset as a huge negative reading.
+  publishDiscoverySensor("battery_discharged", "Leisure battery energy discharged", bt.c_str(),
+                         "{{ value_json.discharged }}", "Wh", "energy", "total_increasing");
+  publishDiscoverySensor("battery_charged",    "Leisure battery energy charged",    bt.c_str(),
+                         "{{ value_json.charged }}",    "Wh", "energy", "total_increasing");
   publishDiscoverySensor("solar_voltage",   "Solar charger voltage",   st.c_str(), "{{ value_json.voltage }}", "V", "voltage");
   publishDiscoverySensor("solar_current",   "Solar charge current",    st.c_str(), "{{ value_json.current }}", "A", "current");
   publishDiscoverySensor("starter_voltage", "Starter battery voltage", rt.c_str(), "{{ value_json.voltage }}", "V", "voltage");
@@ -488,6 +499,10 @@ void publishState() {
     if (s.batt_wh_valid)       doc["energy"]   = s.batt_wh;
     if (s.batt_quality_valid)  doc["quality"]  = s.batt_quality;
     if (s.batt_capacity_valid) doc["capacity"] = s.batt_capacity_ah;
+    if (s.batt_to_empty_valid)  doc["to_empty"]   = s.batt_to_empty_min;
+    if (s.batt_to_full_valid)   doc["to_full"]    = s.batt_to_full_min;
+    if (s.batt_discharged_valid) doc["discharged"] = s.batt_discharged_wh;
+    if (s.batt_charged_valid)    doc["charged"]    = s.batt_charged_wh;
     if (s.batt_current_valid) {
       doc["current"] = roundf(s.batt_current * 100) / 100.0;
       doc["power"]   = roundf(s.batt_voltage * s.batt_current * 10) / 10.0;
@@ -517,6 +532,61 @@ void publishState() {
     String payload; serializeJson(doc, payload);
     mqtt.publish(starterTopic().c_str(), payload.c_str(), true);
   }
+}
+
+// --------------------------------------------------------------------------
+// Raw register mirror
+//
+// Registers the parser understands become named sensors above. Everything else would
+// otherwise be discarded, and that is precisely the data a post-mortem needs: on a
+// healthy bus the candidate alarm registers (0xC0, 0xF0, 0xF1, 0xF2) are all zero, which
+// looks exactly like an unused register. Only a capture taken while the fault is
+// happening can tell those apart, and the fault is intermittent — so it has to be
+// recorded continuously, unattended.
+//
+// Each pair gets its own retained topic, so the broker timestamps every change for free
+// and a constant register costs one message ever. No discovery config is published:
+// naming an entity would claim a meaning we have not established.
+// --------------------------------------------------------------------------
+struct RegMirror {
+  uint8_t  nad = 0, reg = 0;
+  uint8_t  data[4] = {0, 0, 0, 0};
+  uint32_t lastPubMs = 0;
+  bool     used = false;
+};
+RegMirror g_regMirror[NBUS_REG_MIRROR_SLOTS];
+
+void mirrorRegister(uint8_t nad, uint8_t reg, const uint8_t* d) {
+  if (!mqtt.connected()) return;
+
+  RegMirror* slot = nullptr;
+  for (auto& m : g_regMirror) {
+    if (m.used && m.nad == nad && m.reg == reg) { slot = &m; break; }
+    if (!m.used && slot == nullptr) slot = &m;  // remember the first free slot
+  }
+  if (slot == nullptr) return;  // table full; a fixed table cannot be flooded by noise
+
+  const bool isNew   = !slot->used;
+  const bool changed = isNew || memcmp(slot->data, d, 4) != 0;
+  const uint32_t now = millis();
+
+  // Throttle per register rather than globally. A register that never moves publishes
+  // the instant it finally does; only a chronically noisy one is rate-limited, and it is
+  // the quiet ones that matter here.
+  if (!changed) return;
+  if (!isNew && (now - slot->lastPubMs) < NBUS_REG_MIRROR_MS) return;
+
+  slot->used = true;
+  slot->nad  = nad;
+  slot->reg  = reg;
+  memcpy(slot->data, d, 4);
+  slot->lastPubMs = now;
+
+  char topic[64];
+  snprintf(topic, sizeof(topic), "%s/reg/%02X/%02X", cfg.base.c_str(), nad, reg);
+  char payload[9];
+  snprintf(payload, sizeof(payload), "%02X%02X%02X%02X", d[0], d[1], d[2], d[3]);
+  mqtt.publish(topic, payload, true);
 }
 
 // --------------------------------------------------------------------------
@@ -567,6 +637,10 @@ void processFrameWindow(const uint8_t* buf, size_t len) {
       Serial.printf("[lin] NAD %02X reg %02X : %02X %02X %02X %02X\n",
                     d[0], d[3], d[4], d[5], d[6], d[7]);
 #endif
+    } else if (d[1] == 0x06 && d[2] == 0xF4) {
+      // A well-formed response the parser has no meaning for. Checksum and framing
+      // already hold at this point, so it is real bus content, not noise — mirror it.
+      mirrorRegister(d[0], d[3], &d[4]);
     }
     return;  // one response per window
   }

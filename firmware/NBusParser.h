@@ -23,6 +23,13 @@ struct NBusState {
   int   batt_wh      = 0;     bool batt_wh_valid      = false;  // remaining energy (Wh)
   int   batt_quality = 0;     bool batt_quality_valid = false;  // "quality" / SoH-like (%)
   int   batt_capacity_ah = 0; bool batt_capacity_valid = false; // nominal capacity (Ah)
+  // Register 0x34 carries both runtime estimates; the one that does not apply to the
+  // current direction of travel reads 0xFFFF, so each half needs its own validity flag.
+  int   batt_to_empty_min = 0; bool batt_to_empty_valid = false;
+  int   batt_to_full_min  = 0; bool batt_to_full_valid  = false;
+  // Register 0x35: lifetime energy counters, one count per Wh.
+  int   batt_discharged_wh = 0; bool batt_discharged_valid = false;
+  int   batt_charged_wh    = 0; bool batt_charged_valid    = false;
   float cell_v[4]    = {0, 0, 0, 0};                             // cell voltages (V)
   bool  cell_valid[4]= {false, false, false, false};            // [0..1]=reg0x56, [2..3]=reg0x57
 

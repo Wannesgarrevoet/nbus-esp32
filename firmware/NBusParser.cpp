@@ -43,6 +43,27 @@ bool NBusParser::decodeBattery(uint8_t reg, const uint8_t* d) {
       state_.batt_quality_valid = true;
       return true;
 
+    case 0x34: {
+      // H1 = time to full, H2 = time to empty, both in minutes. Only the half matching
+      // the current direction of travel is populated; the other reads 0xFFFF. Confirmed
+      // for H2 by correlating it against remaining Wh / instantaneous power over a 300 s
+      // capture: the two distributions agreed to 1 % with no fitted parameter.
+      const uint16_t to_full  = nbus_u16(d[0], d[1]);
+      const uint16_t to_empty = nbus_u16(d[2], d[3]);
+      state_.batt_to_full_valid = (to_full != 0xFFFF);
+      if (state_.batt_to_full_valid) state_.batt_to_full_min = to_full;
+      state_.batt_to_empty_valid = (to_empty != 0xFFFF);
+      if (state_.batt_to_empty_valid) state_.batt_to_empty_min = to_empty;
+      return true;
+    }
+
+    case 0x35:  // cumulative charged / discharged energy, one count per Wh
+      state_.batt_charged_wh = nbus_u16(d[0], d[1]);
+      state_.batt_charged_valid = true;
+      state_.batt_discharged_wh = nbus_u16(d[2], d[3]);
+      state_.batt_discharged_valid = true;
+      return true;
+
     case 0x36:  // Wh Wl → remaining energy (big-endian u16)
       state_.batt_wh = nbus_u16(d[0], d[1]);
       state_.batt_wh_valid = true;

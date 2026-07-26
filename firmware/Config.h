@@ -67,6 +67,13 @@
 #define NBUS_PUBLISH_MS        5000    // min interval between state publishes
 #define NBUS_STALE_MS          30000   // mark a value stale if not refreshed within
 
+// Mirror of registers the parser does NOT decode, republished raw so that a fault leaves
+// a trace even in registers whose meaning is still unknown. Several candidate alarm
+// registers read all-zero on a healthy bus, which is indistinguishable from "unused"
+// until the day one of them flips — and that day is the whole point of this device.
+#define NBUS_REG_MIRROR_SLOTS  48      // distinct (NAD, reg) pairs tracked; 27 seen so far
+#define NBUS_REG_MIRROR_MS     10000   // per-register floor between republishes
+
 // Reconnect backoff and heartbeat.
 #define NBUS_MQTT_RETRY_MS     5000
 #define NBUS_HEARTBEAT_MS      1000
