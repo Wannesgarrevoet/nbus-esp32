@@ -8,6 +8,7 @@
 
 #include <Preferences.h>
 #include <WebServer.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <WiFiManager.h>     // tzapu
 #include <PubSubClient.h>    // knolleary
@@ -27,6 +28,14 @@
 // --------------------------------------------------------------------------
 // Globals
 // --------------------------------------------------------------------------
+// Declared up here rather than beside the ring-buffer code that uses it: the .ino
+// preprocessor hoists generated prototypes to the top of the file, so any type
+// named in a function signature must already exist before the first function.
+struct RawEntry {
+  uint32_t ms;
+  uint8_t  d[8];   // NAD PCI SID reg d0 d1 d2 d3 — checksum already verified, so not stored
+};
+
 HardwareSerial   LinSerial(NBUS_UART_NUM);
 NBusParser       parser;
 Preferences      prefs;
@@ -303,7 +312,28 @@ void addField(String& p, const char* name, const char* label, const String& valu
   p += F("'></label>");
 }
 
+// --------------------------------------------------------------------------
+// HTTP authentication
+//
+// These endpoints are reachable from the whole tailnet and from anyone on the
+// camper LAN. /config can repoint the device at a different broker and /update
+// replaces the firmware outright, so neither can stay open. The credentials are
+// the ones already stored for ElegantOTA rather than a second set, because two
+// passwords for one device is how one of them ends up forgotten.
+//
+// With no credentials configured the device stays open: a freshly provisioned
+// unit has none yet, and locking it out of its own first configuration would
+// need a USB cable to undo — the exact dependency this whole exercise removes.
+// --------------------------------------------------------------------------
+bool requireAuth() {
+  if (cfg.otaUser.isEmpty()) return true;
+  if (httpServer.authenticate(cfg.otaUser.c_str(), cfg.otaPass.c_str())) return true;
+  httpServer.requestAuthentication();
+  return false;
+}
+
 void handleConfigGet() {
+  if (!requireAuth()) return;
   String p = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
                "<title>N-Bus settings</title><style>"
                "body{font-family:sans-serif;max-width:24em;margin:2em auto;padding:0 1em}"
@@ -316,11 +346,19 @@ void handleConfigGet() {
   addField(p, "user", "Username", cfg.user, "text");
   addField(p, "pass", "Password (blank = keep current)", "", "password");
   addField(p, "base", "Base topic", cfg.base, "text");
+  // Exposed here and not only in the setup portal: the portal needs the button held
+  // on the physical device, and a credential you can only set by standing next to the
+  // camper is no use for a box that is meant to be administered over the network.
+  p += F("<h2>Access</h2><p style='font-size:.85em;color:#555'>Guards /config, /update "
+         "and /raw. Leave the username blank to disable authentication.</p>");
+  addField(p, "otau", "Username", cfg.otaUser, "text");
+  addField(p, "otap", "Password (blank = keep current)", "", "password");
   p += F("<button type='submit'>Save &amp; reconnect</button></form>");
   httpServer.send(200, "text/html", p);
 }
 
 void handleConfigPost() {
+  if (!requireAuth()) return;
   if (httpServer.hasArg("host")) cfg.host = httpServer.arg("host");
   if (httpServer.hasArg("port")) cfg.port = httpServer.arg("port").toInt();
   if (httpServer.hasArg("user")) cfg.user = httpServer.arg("user");
@@ -328,11 +366,20 @@ void handleConfigPost() {
   // without having to retype the broker password.
   if (httpServer.arg("pass").length()) cfg.pass = httpServer.arg("pass");
   if (httpServer.hasArg("base")) cfg.base = httpServer.arg("base");
+  if (httpServer.hasArg("otau")) cfg.otaUser = httpServer.arg("otau");
+  if (httpServer.arg("otap").length()) cfg.otaPass = httpServer.arg("otap");
   if (cfg.port == 0) cfg.port = 1883;
   if (cfg.base.isEmpty()) cfg.base = NBUS_DEFAULT_BASE_TOPIC;
   saveConfig();
-  Serial.printf("[cfg] saved MQTT %s:%u user '%s' base '%s'\n",
-                cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.base.c_str());
+  Serial.printf("[cfg] saved MQTT %s:%u user '%s' base '%s', auth %s\n",
+                cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.base.c_str(),
+                cfg.otaUser.isEmpty() ? "off" : "on");
+
+  // Apply the new credentials at once. requireAuth() reads cfg directly and needs
+  // nothing, but ElegantOTA keeps its own copy, so /update would otherwise stay on
+  // the old setting until a reboot — the one endpoint where that gap matters most.
+  if (cfg.otaUser.isEmpty()) ElegantOTA.clearAuth();
+  else ElegantOTA.setAuth(cfg.otaUser.c_str(), cfg.otaPass.c_str());
 
   // Reconnect immediately with the new settings and re-announce discovery, so a
   // changed base topic reaches Home Assistant without a reboot.
@@ -372,10 +419,18 @@ void onWifiUp() {
                     F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
                       "<h2>N-Bus camper bridge</h2>"
                       "<p><a href='/config'>MQTT settings</a></p>"
-                      "<p><a href='/update'>Firmware update</a></p>"));
+                      "<p><a href='/update'>Firmware update</a></p>"
+                      "<p><a href='/status'>Status (JSON)</a></p>"
+                      "<p><a href='/raw/dump'>Raw bus capture</a> &middot; "
+                      "<a href='/raw/files'>saved dumps</a></p>"));
   });
   httpServer.on("/config", HTTP_GET, handleConfigGet);
   httpServer.on("/config", HTTP_POST, handleConfigPost);
+  httpServer.on("/status",     HTTP_GET, handleStatus);
+  httpServer.on("/raw/dump",   HTTP_GET, handleRawDump);
+  httpServer.on("/raw/save",   HTTP_GET, handleRawSave);
+  httpServer.on("/raw/files",  HTTP_GET, handleRawFiles);
+  httpServer.on("/raw/file",   HTTP_GET, handleRawFile);
   ElegantOTA.begin(&httpServer);
   httpServer.begin();
   Serial.println(F("[ota] web server on :80 (/update)"));
@@ -590,6 +645,236 @@ void mirrorRegister(uint8_t nad, uint8_t reg, const uint8_t* d) {
 }
 
 // --------------------------------------------------------------------------
+// Raw frame ring buffer
+//
+// Every checksum-valid frame lands here with a timestamp. Nothing is written to
+// flash while the bus is healthy — at ~12 frames/s that would wear the chip out
+// in days, and the recent past is the only part anyone wants anyway. The ring is
+// flushed to flash exactly once, when the bus falls silent, which is the event
+// this device exists to catch.
+//
+// Statically allocated on purpose. 48 KB is a large enough bite that a runtime
+// malloc failure would be a real possibility, and it would surface as "captures
+// nothing" long after the fact. At link time it either fits or it does not.
+// --------------------------------------------------------------------------
+static RawEntry g_ring[NBUS_RAW_RING_ENTRIES];
+static uint32_t g_ringHead  = 0;   // next slot to write
+static uint32_t g_ringTotal = 0;   // frames ever recorded; also tells us whether we wrapped
+static uint32_t g_lastFrameMs = 0;
+static bool     g_busSilent = false;
+static uint32_t g_dumpSeq = 0;
+
+// Single-threaded by construction: readLin() and httpServer.handleClient() both
+// run from loop(), so the ring needs no locking. Keep it that way.
+inline uint32_t ringCount() {
+  return (g_ringTotal < NBUS_RAW_RING_ENTRIES) ? g_ringTotal : NBUS_RAW_RING_ENTRIES;
+}
+inline uint32_t ringOldest() {
+  return (g_ringTotal < NBUS_RAW_RING_ENTRIES) ? 0 : g_ringHead;
+}
+
+void ringPush(const uint8_t* d) {
+  RawEntry& e = g_ring[g_ringHead];
+  e.ms = millis();
+  memcpy(e.d, d, 8);
+  g_ringHead = (g_ringHead + 1) % NBUS_RAW_RING_ENTRIES;
+  g_ringTotal++;
+}
+
+int formatEntry(const RawEntry& e, char* out, size_t n) {
+  return snprintf(out, n, "%lu %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                  (unsigned long)e.ms,
+                  e.d[0], e.d[1], e.d[2], e.d[3], e.d[4], e.d[5], e.d[6], e.d[7]);
+}
+
+// --------------------------------------------------------------------------
+// Raw dump persistence
+// --------------------------------------------------------------------------
+bool g_fsReady = false;
+
+void rawFsInit() {
+  g_fsReady = LittleFS.begin(true);   // format on first boot if unformatted
+  if (!g_fsReady) {
+    Serial.println(F("[raw] LittleFS mount failed — dumps disabled"));
+    return;
+  }
+  if (!LittleFS.exists(NBUS_RAW_DUMP_DIR)) LittleFS.mkdir(NBUS_RAW_DUMP_DIR);
+  prefs.begin("nbus", true);
+  g_dumpSeq = prefs.getUInt("dumpseq", 0);
+  prefs.end();
+  Serial.printf("[raw] LittleFS %u/%u bytes used\n",
+                (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+}
+
+// Keep only the newest NBUS_RAW_MAX_DUMPS files. Sequence numbers are monotonic
+// across reboots (they live in NVS), so "lowest number" really is "oldest" —
+// millis() would not survive the very reset we are trying to record.
+void rawPruneDumps() {
+  while (true) {
+    File dir = LittleFS.open(NBUS_RAW_DUMP_DIR);
+    if (!dir) return;
+    int count = 0;
+    uint32_t lowest = 0xFFFFFFFF;
+    String lowestName;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      count++;
+      String nm = String(f.name());
+      uint32_t seq = (uint32_t)strtoul(nm.c_str(), nullptr, 10);
+      if (seq < lowest) { lowest = seq; lowestName = nm; }
+    }
+    dir.close();
+    if (count <= NBUS_RAW_MAX_DUMPS || lowestName.isEmpty()) return;
+    LittleFS.remove(String(NBUS_RAW_DUMP_DIR) + "/" + lowestName);
+  }
+}
+
+void rawPersist(const char* reason) {
+  if (!g_fsReady || ringCount() == 0) return;
+  g_dumpSeq++;
+  prefs.begin("nbus", false);
+  prefs.putUInt("dumpseq", g_dumpSeq);
+  prefs.end();
+  char path[48];
+  snprintf(path, sizeof(path), "%s/%06lu.txt", NBUS_RAW_DUMP_DIR, (unsigned long)g_dumpSeq);
+  File f = LittleFS.open(path, "w");
+  if (!f) { Serial.printf("[raw] cannot write %s\n", path); return; }
+
+  const uint32_t n = ringCount();
+  f.printf("# nbus raw dump v1\n# fw %s (%s)\n# reason %s\n",
+           NBUS_FW_VERSION, NBUS_FW_BUILD, reason);
+  f.printf("# written_at_ms %lu  frames %lu  total_seen %lu\n",
+           (unsigned long)millis(), (unsigned long)n, (unsigned long)g_ringTotal);
+  f.print(F("# t_ms NAD PCI SID REG D0 D1 D2 D3\n"));
+
+  char line[48];
+  uint32_t idx = ringOldest();
+  for (uint32_t i = 0; i < n; ++i) {
+    formatEntry(g_ring[idx], line, sizeof(line));
+    f.print(line);
+    idx = (idx + 1) % NBUS_RAW_RING_ENTRIES;
+    if ((i & 0xFF) == 0) esp_task_wdt_reset();   // 4096 flash writes outlast a 30 s watchdog
+  }
+  f.close();
+  Serial.printf("[raw] wrote %s (%lu frames, reason: %s)\n", path, (unsigned long)n, reason);
+  rawPruneDumps();
+
+  if (mqtt.connected()) {
+    char topic[64];
+    snprintf(topic, sizeof(topic), "%s/raw/dump", cfg.base.c_str());
+    mqtt.publish(topic, path, true);
+  }
+}
+
+// --------------------------------------------------------------------------
+// HTTP endpoints for remote capture
+// --------------------------------------------------------------------------
+
+// /status is deliberately NOT behind auth. It is the liveness probe: if the
+// credentials are ever wrong, this is how you find out the device is alive at
+// all rather than guessing between "bad password" and "bricked by that OTA".
+// It therefore carries nothing worth protecting — no topics, no hostnames.
+void handleStatus() {
+  JsonDocument doc;
+  doc["version"]   = NBUS_FW_VERSION;
+  doc["build"]     = NBUS_FW_BUILD;
+  doc["uptime_s"]  = millis() / 1000;
+  doc["heap_free"] = ESP.getFreeHeap();
+  doc["heap_min"]  = ESP.getMinFreeHeap();
+  doc["rssi"]      = WiFi.RSSI();
+  doc["mqtt"]      = mqtt.connected();
+  doc["frames"]    = g_ringTotal;
+  doc["ring_used"] = ringCount();
+  doc["ring_size"] = (uint32_t)NBUS_RAW_RING_ENTRIES;
+  doc["bus_silent"] = g_busSilent;
+  doc["last_frame_age_ms"] = g_lastFrameMs ? (millis() - g_lastFrameMs) : 0;
+  doc["fs_used"]   = g_fsReady ? LittleFS.usedBytes() : 0;
+  doc["fs_total"]  = g_fsReady ? LittleFS.totalBytes() : 0;
+  doc["dump_seq"]  = g_dumpSeq;
+  String out;
+  serializeJson(doc, out);
+  httpServer.send(200, "application/json", out);
+}
+
+// Stream the live ring. `?since=<ms>` returns only entries newer than that
+// timestamp, which lets a poller follow the bus without the server holding the
+// connection open — a long-lived stream would block loop(), and loop() is what
+// drains the UART. Starving the reader to watch the reader would be perverse.
+void handleRawDump() {
+  if (!requireAuth()) return;
+  const uint32_t since = httpServer.hasArg("since")
+                       ? (uint32_t)strtoul(httpServer.arg("since").c_str(), nullptr, 10) : 0;
+  httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  httpServer.send(200, "text/plain", "");
+
+  char hdr[160];
+  snprintf(hdr, sizeof(hdr),
+           "# nbus raw dump v1\n# fw %s\n# now_ms %lu  frames %lu  total_seen %lu\n"
+           "# t_ms NAD PCI SID REG D0 D1 D2 D3\n",
+           NBUS_FW_VERSION, (unsigned long)millis(),
+           (unsigned long)ringCount(), (unsigned long)g_ringTotal);
+  httpServer.sendContent(hdr);
+
+  String chunk;
+  chunk.reserve(1700);
+  char line[48];
+  const uint32_t n = ringCount();
+  uint32_t idx = ringOldest();
+  for (uint32_t i = 0; i < n; ++i) {
+    const RawEntry& e = g_ring[idx];
+    idx = (idx + 1) % NBUS_RAW_RING_ENTRIES;
+    if (e.ms <= since) continue;
+    formatEntry(e, line, sizeof(line));
+    chunk += line;
+    if (chunk.length() > 1400) {
+      httpServer.sendContent(chunk);
+      chunk = "";
+      esp_task_wdt_reset();
+    }
+  }
+  if (chunk.length()) httpServer.sendContent(chunk);
+  httpServer.sendContent("");
+}
+
+void handleRawSave() {
+  if (!requireAuth()) return;
+  rawPersist("manual");
+  httpServer.send(200, "text/plain", "saved\n");
+}
+
+void handleRawFiles() {
+  if (!requireAuth()) return;
+  if (!g_fsReady) { httpServer.send(503, "text/plain", "fs unavailable\n"); return; }
+  String out;
+  File dir = LittleFS.open(NBUS_RAW_DUMP_DIR);
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    out += f.name();
+    out += '\t';
+    out += String((uint32_t)f.size());
+    out += '\n';
+  }
+  dir.close();
+  httpServer.send(200, "text/plain", out.isEmpty() ? String("(none)\n") : out);
+}
+
+void handleRawFile() {
+  if (!requireAuth()) return;
+  if (!g_fsReady || !httpServer.hasArg("n")) {
+    httpServer.send(400, "text/plain", "usage: /raw/file?n=<name>\n");
+    return;
+  }
+  // Take only the basename: the argument indexes our own dump directory and is
+  // never allowed to walk out of it.
+  String name = httpServer.arg("n");
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) name = name.substring(slash + 1);
+  const String path = String(NBUS_RAW_DUMP_DIR) + "/" + name;
+  File f = LittleFS.open(path, "r");
+  if (!f) { httpServer.send(404, "text/plain", "no such dump\n"); return; }
+  httpServer.streamFile(f, "text/plain");
+  f.close();
+}
+
+// --------------------------------------------------------------------------
 // LIN frame capture (read-only)
 // --------------------------------------------------------------------------
 void markFresh(uint8_t nad, uint8_t reg) {
@@ -630,6 +915,12 @@ void processFrameWindow(const uint8_t* buf, size_t len) {
         return;
       }
     }
+
+    // Record before dispatching. The ring is deliberately indiscriminate: a frame
+    // the parser already understands is still evidence, and the registers we have
+    // not decoded yet are exactly the ones a fault is most likely to show up in.
+    ringPush(d);
+    g_lastFrameMs = millis();
 
     if (parser.feedResponse(d, 8)) {
       markFresh(d[0], d[3]);
@@ -693,7 +984,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
-  Serial.println(F("\n[boot] N-Bus ESP32-C3 firmware"));
+  Serial.printf("\n[boot] N-Bus ESP32-C3 firmware %s (%s)\n", NBUS_FW_VERSION, NBUS_FW_BUILD);
 
   maybeFactoryReset();
   loadConfig();
@@ -705,6 +996,8 @@ void setup() {
     Serial.printf("[cfg] MQTT %s:%u, user '%s', base '%s'\n",
                   cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.base.c_str());
   }
+
+  rawFsInit();
 
   // LIN UART: RX-only. TX pin is -1 — the bus is never driven.
   LinSerial.begin(NBUS_BAUD, SERIAL_8N1, NBUS_RX_PIN, NBUS_TX_PIN);
@@ -750,6 +1043,23 @@ void loop() {
     if (millis() - g_lastPublishMs > NBUS_PUBLISH_MS) {
       g_lastPublishMs = millis();
       publishState();
+    }
+  }
+
+  // Bus silence is the trigger for everything this device was built to catch.
+  // On a powerbank the ESP outlives the fault, so there is no rush and no need
+  // for a brownout handler: the bus simply stops answering and we calmly write
+  // the preceding minutes to flash. Edge-triggered — one dump per silence, not
+  // one per loop — and re-armed only once frames actually resume.
+  if (g_lastFrameMs) {
+    const uint32_t age = millis() - g_lastFrameMs;
+    if (!g_busSilent && age > NBUS_RAW_SILENCE_MS) {
+      g_busSilent = true;
+      Serial.printf("[raw] bus silent for %lu ms — persisting ring\n", (unsigned long)age);
+      rawPersist("bus silent");
+    } else if (g_busSilent && age < NBUS_RAW_SILENCE_MS) {
+      g_busSilent = false;
+      Serial.println(F("[raw] bus is back"));
     }
   }
 

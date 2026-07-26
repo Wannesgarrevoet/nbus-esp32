@@ -10,6 +10,9 @@
 secrets.h
 *.local
 
+# Python helper scripts in tools/
+__pycache__/
+
 # Editor / OS
 .vscode/
 .idea/

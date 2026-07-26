@@ -53,8 +53,54 @@ def classic_checksum(data):
     return (~total) & 0xFF
 
 
+# Lines written by the device's own /raw/dump and its flash dumps:
+#   <t_ms> NAD PCI SID REG D0 D1 D2 D3
+# The device has already verified the checksum, so it does not store or emit one.
+DUMP_LINE = re.compile(
+    r"^\s*(\d+)((?:\s+[0-9A-Fa-f]{2}){8})\s*$"
+)
+
+
+def extract_dump(path):
+    """Yield (ms, nad, reg, data) from a device dump. Returns None if not that format."""
+    frames = []
+    with open(path, "r", errors="replace") as fh:
+        first = fh.readline()
+        if not first.startswith("# nbus raw dump"):
+            return None
+        for line in fh:
+            m = DUMP_LINE.match(line)
+            if not m:
+                continue
+            ms = int(m.group(1))
+            b = [int(t, 16) for t in m.group(2).split()]
+            if b[2] != SID_RESPONSE:
+                continue
+            frames.append((ms, b[0], b[3], tuple(b[4:8])))
+    span = (frames[-1][0] - frames[0][0]) / 1000.0 if len(frames) > 1 else 0.0
+    print(
+        f"device dump: {len(frames)} frames over {span:.1f} s "
+        f"({len(frames) / span:.1f}/s)" if span else f"device dump: {len(frames)} frames",
+        file=sys.stderr,
+    )
+    return frames
+
+
 def extract_frames(path):
-    """Yield (nad, reg, (d0, d1, d2, d3)) for every checksum-valid response."""
+    """Yield (ms, nad, reg, (d0..d3)) for every checksum-valid response.
+
+    Two input formats are accepted. A USB serial capture carries the firmware's
+    "[raw N] ..." window dumps, where the checksum is present and re-verified here
+    so a noisy tap cannot invent a register. A device dump fetched over the network
+    carries a millisecond timestamp per frame and no checksum, because the device
+    validated it before storing it. Serial captures have no timestamps, so ms is
+    None for those.
+    """
+    dump = extract_dump(path)
+    if dump is not None:
+        yield from dump
+        return
+
     hex_pair = re.compile(r"\b[0-9A-F]{2}\b")
     kept = dropped = 0
 
@@ -83,7 +129,7 @@ def extract_frames(path):
                     i += 1
                     continue
                 kept += 1
-                yield nad, reg, tuple(frame[4:8])
+                yield None, nad, reg, tuple(frame[4:8])
                 i += 2 + FRAME_LEN
 
     print(f"frames accepted: {kept}   checksum rejects: {dropped}", file=sys.stderr)
@@ -174,25 +220,34 @@ def timeseries(path, nad_want, reg_want):
     hundreds of identical lines.
     """
     state = BusState()
+    with open(path, "r", errors="replace") as fh:
+        timestamped = fh.readline().startswith("# nbus raw dump")
+    header_t = "   t(s)" if timestamped else ""
     print(
         f"# {NAD_NAMES.get(nad_want, hex(nad_want))} 0x{reg_want:02X}\n"
-        f"#    n  raw            hi16    lo16     |  batt V   batt A  SoC     Wh"
+        f"#    n{header_t}  raw            hi16    lo16     |  batt V   batt A  SoC     Wh"
         f"    pv V    pv A"
     )
 
     prev = None
     count = 0
     shown = 0
+    t0 = None
 
-    def flush(data, repeats, at):
+    def flush(data, repeats, at, ms):
         nonlocal shown
         raw = " ".join(f"{b:02X}" for b in data)
         hi, lo = u16(data[0], data[1]), u16(data[2], data[3])
         tag = f"x{repeats}" if repeats > 1 else "  "
-        print(f"{shown:5d}  {raw}  {hi:6d}  {lo:6d} {tag} |  {at}")
+        # Elapsed seconds since the first frame, not raw millis: the absolute value is
+        # uptime and means nothing, while the interval between samples is the point.
+        stamp = f"{(ms - t0) / 1000.0:7.1f}" if ms is not None and t0 is not None else ""
+        print(f"{shown:5d}{stamp}  {raw}  {hi:6d}  {lo:6d} {tag} |  {at}")
         shown += 1
 
-    for nad, reg, data in extract_frames(path):
+    for ms, nad, reg, data in extract_frames(path):
+        if t0 is None and ms is not None:
+            t0 = ms
         state.update(nad, reg, data)
         if (nad, reg) != (nad_want, reg_want):
             continue
@@ -200,11 +255,11 @@ def timeseries(path, nad_want, reg_want):
             count += 1
             continue
         if prev is not None:
-            flush(prev, count, at_state)
-        prev, count, at_state = data, 1, str(state)
+            flush(prev, count, at_state, at_ms)
+        prev, count, at_state, at_ms = data, 1, str(state), ms
 
     if prev is not None:
-        flush(prev, count, at_state)
+        flush(prev, count, at_state, at_ms)
     return 0
 
 
@@ -221,7 +276,7 @@ def main():
         return 1
 
     seen = collections.defaultdict(list)
-    for nad, reg, data in extract_frames(sys.argv[1]):
+    for _ms, nad, reg, data in extract_frames(sys.argv[1]):
         seen[(nad, reg)].append(data)
 
     for title, wanted in (("KNOWN REGISTERS", True), ("UNMAPPED REGISTERS", False)):

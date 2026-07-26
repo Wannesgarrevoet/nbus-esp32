@@ -7,6 +7,16 @@
 #define NBUS_CONFIG_H
 
 // ---------------------------------------------------------------------------
+// Firmware identity. Reported by /status, which exists so that after a network
+// update there is a way to tell which image actually ended up running. Without
+// it an OTA that silently fails over to the other partition looks identical to
+// one that succeeded. Bump NBUS_FW_VERSION whenever flashing something you may
+// later need to distinguish.
+// ---------------------------------------------------------------------------
+#define NBUS_FW_VERSION  "0.4.0"
+#define NBUS_FW_BUILD    __DATE__ " " __TIME__
+
+// ---------------------------------------------------------------------------
 // LIN bus (read-only). RX on UART1 / GPIO20. TX is NEVER assigned (-1): driving
 // the bus is a hard safety violation. The C3 has no UART2/GPIO16.
 // Avoid strapping pins GPIO2/GPIO8/GPIO9 for the LIN line (idle-high bus must not
@@ -80,5 +90,24 @@
 
 // Watchdog timeout (seconds).
 #define NBUS_WDT_TIMEOUT_S     30
+
+// ---------------------------------------------------------------------------
+// Raw frame ring buffer.
+//
+// The point of this device is to be watching at the moment the power fails, and
+// the interesting data is what happened in the seconds BEFORE the bus went quiet.
+// So frames go into a RAM ring continuously and are only written to flash once
+// the bus stops talking — writing every frame would destroy the flash in days.
+//
+// 12 bytes per entry (4-byte millis + the 8 payload bytes; the checksum is
+// already verified by then and carries no information worth storing).
+// 4096 entries = 48 KB of RAM and, at the ~12 frames/s this bus actually runs at,
+// about 5.5 minutes of history. That window is the design parameter: it has to be
+// long enough to contain whatever precedes the disconnect.
+// ---------------------------------------------------------------------------
+#define NBUS_RAW_RING_ENTRIES  4096
+#define NBUS_RAW_SILENCE_MS    5000    // no valid frame this long ⇒ bus considered dead
+#define NBUS_RAW_MAX_DUMPS     8       // keep at most this many dump files, oldest pruned
+#define NBUS_RAW_DUMP_DIR      "/dumps"
 
 #endif  // NBUS_CONFIG_H
