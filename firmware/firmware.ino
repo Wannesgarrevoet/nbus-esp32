@@ -13,6 +13,7 @@
 #include <PubSubClient.h>    // knolleary
 #include <ArduinoJson.h>     // bblanchon (v7)
 #include <ElegantOTA.h>      // ayushsharma82
+#include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 
@@ -180,7 +181,13 @@ const char* authModeName(wifi_auth_mode_t m) {
 }
 
 void logVisibleNetworks() {
-  Serial.printf("[wifi] stored SSID '%s'\n", wm.getWiFiSSID().c_str());
+  // Read from efuse, not WiFi.macAddress(): the driver is already stopped here and
+  // would report all zeros.
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  Serial.printf("[wifi] stored SSID '%s', STA MAC %02X:%02X:%02X:%02X:%02X:%02X, hostname %s\n",
+                wm.getWiFiSSID().c_str(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                NBUS_HOSTNAME);
   const int n = WiFi.scanNetworks();
   Serial.printf("[wifi] %d networks visible (2.4 GHz only):\n", n);
   for (int i = 0; i < n; ++i) {
@@ -203,6 +210,9 @@ void startProvisioning() {
   pOtaU.setValue(cfg.otaUser.c_str(), 32);
   pOtaP.setValue(cfg.otaPass.c_str(), 32);
 
+  // Makes the device identifiable in the router's client list instead of showing up
+  // as a nameless MAC address.
+  wm.setHostname(NBUS_HOSTNAME);
   wm.setSaveConfigCallback(onSaveConfig);
   wm.setConfigPortalBlocking(false);
   // Bounds the one blocking step left in autoConnect(): the attempt on the saved AP.

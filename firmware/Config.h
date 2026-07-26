@@ -33,6 +33,7 @@
 // Wi-Fi provisioning portal
 // ---------------------------------------------------------------------------
 #define NBUS_AP_NAME    "NBus-Setup"
+#define NBUS_HOSTNAME   "nbus-camper"   // shown in the router's client list
 #define NBUS_AP_TIMEOUT_S  180  // portal idle timeout before reboot/retry
 // Cap on the saved-AP connect attempt, the only blocking step left in setup().
 #define NBUS_WIFI_CONNECT_TIMEOUT_S 15
