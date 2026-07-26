@@ -64,13 +64,13 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 
 | reg | bytes | meaning | unit | status |
 |-----|-------|---------|------|--------|
-| 0x02 | `Vh Vl Ih Il` | battery voltage + battery current | V=0.01 V; I=0.01 A, **bit15=1 → discharging**; bit15=0 → charging (LIKELY, BLE) | CONFIRMED (discharge only) |
+| 0x02 | `Vh Vl Ih Il` | battery voltage + battery current | V=0.01 V; I=0.01 A, **bit15=1 → discharging, bit15=0 → charging** | CONFIRMED (both directions) |
 | 0x07 | `00 00 Ah Al` | nominal capacity (150 Ah) | Ah, big-endian 16-bit in `d2 d3` | CONFIRMED |
 | 0x0B | `b0` | State of Charge | % (0x4B = 75%) | CONFIRMED |
 | 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | CONFIRMED |
-| 0x34 | `H1h H1l H2h H2l` | H1 = time to full, H2 = time to empty; the inactive one reads FFFF | minutes, big-endian 16-bit | H2 CONFIRMED; H1 LIKELY (never seen non-FFFF) |
-| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: D counts up while discharging, C stayed constant with no charging | Wh, big-endian 16-bit | D LIKELY; C UNRESOLVED |
-| 0x36 | `Wh Wl (FF FF)` | remaining energy | Wh, big-endian 16-bit | CONFIRMED |
+| 0x34 | `H1h H1l H2h H2l` | H1 = time to full, H2 = time to empty; the inactive one reads FFFF | minutes, big-endian 16-bit | CONFIRMED (both halves) |
+| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging | Wh, big-endian 16-bit | CONFIRMED (direction); unit ~1 Wh/count |
+| 0x36 | `Wh Wl (FF FF)` | remaining energy — the gauge's *estimate*, revised on load changes, not a coulomb integral | Wh, big-endian 16-bit | CONFIRMED |
 | 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x54 | `idx` + ASCII | serial-number fragment (index 0x0F, "KAA") | text | CONFIRMED |
@@ -93,11 +93,68 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > but the battery publishes the figure itself, and the H1/H2 charge/discharge asymmetry
 > already documented is exactly the time-to-full / time-to-empty pairing.
 
-> **How 0x35's low half was read.** Its low 16 bits rose 2578 → 2580 over 289 s while the
-> mean load was 26.6 W, i.e. **1.07 Wh per count** — one count per Wh. Only two increments
-> fell inside the capture, so the *unit* is well supported but the *rate* is coarse; a
-> longer capture would tighten it. The high half sat at 2828 throughout, which is
-> uninformative because nothing was charging.
+> **The charging capture (300 s, solar active, 3601 frames).** This one capture settled the
+> three questions that had been open longest, because it caught the bus swinging from
+> +5.5 A charge to −5.7 A discharge and back.
+>
+> *0x02 bit15.* Previously only ever seen set. Here both states occur with real magnitude,
+> and the direction is checked against a register that is not part of the formula:
+> **remaining energy 0x36 rises while bit15 is clear (1084 → 1086 Wh) and falls while it is
+> set (1080 → 1078 Wh).** Since 0x36 is decoded independently, this is not circular.
+> See the caveat on 0x36 below: that witness holds at the multi-amp currents of this
+> capture, but 0x36 is an estimate and not a pure integral, so it is not reliable as a
+> direction witness at low current.
+>
+> *0x34.* Exactly one half is populated at any moment, and which half it is tracks the sign
+> of 0x02. The arithmetic closes without a fitted parameter:
+>
+> | half | reg value | remaining Wh | power | prediction | error |
+> |------|-----------|--------------|-------|-----------|-------|
+> | H2 (discharge) | 918 min | 1079 | 70.2 W | 922 min | 0.4 % |
+> | H2 (discharge) | 866 min | 1078 | 74.6 W | 867 min | 0.1 % |
+> | H2 (discharge) | 996 min | 1080 | 65.6 W | 988 min | 0.8 % |
+>
+> H2 is simply `remaining / power`. **H1 is not** — it only closes against the *deficit*,
+> `(full − remaining) / power`, which is what makes it time-to-full rather than a second
+> estimate of the same thing. Solving four charging samples for the implied full capacity
+> gives 1983, 1972, 1839 and 1932 Wh, mean **1932 Wh** — against the nominal 150 Ah × 12.8 V
+> = 1920 Wh from register 0x07, a **0.6 % match**. The ±4 % spread is expected: the gauge
+> filters its current, we use the instantaneous sample.
+>
+> *0x35.* Its high half rose 2848 → 2850 and its low half 2609 → 2610, and the two never
+> moved at the same time: **the high half incremented only in samples where 0x02 showed
+> charge, the low half only where it showed discharge.** That direction split is what fixes
+> C = charged, D = discharged. The unit is consistent with 1 Wh/count on both this capture
+> and the earlier one (0.9 and 1.07 Wh/count), but both estimates depend on my guessing the
+> width of the window from frame ordering — there are no timestamps in the capture yet. The
+> unit stays "~1 Wh" until the timestamped ring buffer can measure it properly.
+>
+> *Three unexplained samples.* In 3 of 53 0x34 frames the same value appears in the other
+> half from the one the current sign implies (e.g. `02 B6 FF FF` followed by `FF FF 02 B6`
+> at unchanged current). They cluster at direction changes, so the likely cause is the
+> snapshot lag described above rather than a decoding error — but it is not proven, and it
+> is recorded here rather than smoothed away.
+
+> **The first timestamped capture (339 s, 4096 frames, pulled over the network).** The ring
+> buffer records millis() per frame, so energy can finally be integrated against the clock
+> instead of guessed from frame ordering.
+>
+> *0x35 unit.* The discharge counter D incremented twice. Only the second interval is
+> usable — the first has an unknown amount of energy already accumulated before the window
+> opened — and between those two increments the trapezoidal integral of V·I is
+> **1.05 Wh for exactly one count**. With the two order-of-magnitude estimates from the
+> untimed captures (0.9 and 1.07), the unit is consistent with exactly **1 Wh/count**. This
+> is one clean interval, so it is not yet CONFIRMED; a capture under sustained heavy load
+> would produce increments fast enough to settle it outright.
+>
+> *0x36 is an estimate, not an integral.* Over this capture the battery discharged
+> continuously (0.5–5.2 A, never charging) and integrated to 1.57 Wh out, yet 0x36 **rose**
+> 1059 → 1063 Wh while SoC fell 55 % → 54 %. The rise coincides with a 5.2 A load dropping
+> away and terminal voltage recovering 13.13 → 13.18 V, which is the signature of a gauge
+> revising its estimate upward as the load is removed rather than counting coulombs. This
+> matters for fault detection: **a rising 0x36 does not prove the battery is charging**, so
+> anything watching for the disconnect should trigger on 0x02 and the cell voltages, not on
+> remaining energy.
 
 ## Register map — NAD 0x81 (solar charger)
 
@@ -107,11 +164,12 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x01 | `Vh Vl` | starter-battery voltage | 0.01 V | CONFIRMED |
 | 0x1B | `Vh Vl (FF FF)` | panel/input voltage | 0.01 V (13.5–24.5 V observed) | LIKELY |
 | 0x1C | `xh xl (FF FF)` | flickers 0/1/2/5 with no correlation to charge current | ? | UNRESOLVED |
-| 0x11 | `xh xl (FF FF)` | ~870, falling slowly and almost monotonically (873 → 866 over 300 s) | ? | UNRESOLVED |
+| 0x35 | `Eh El 00 00` | cumulative energy produced — rose 178 → 183 and **only while the panel was delivering**, mirroring the battery's 0x35 layout | ~1 Wh/count | LIKELY |
+| 0x11 | `xh xl (FF FF)` | slow-moving, ~1016–1038. Falls while output is low and rises while it is high, but lags far behind — a filtered or accumulated quantity, not an instantaneous one | ? | UNRESOLVED |
 | 0x0B | `b0` | 78 — same layout as the battery's SoC register, but the battery reported 56 % at the same moment | % | UNCERTAIN |
 | 0x54 | `idx` + ASCII | serial-number fragment (index 0x00, "ACD") | text | CONFIRMED |
 | 0x55 | `00 ** ** **` | same index byte as 0x54; likely the numeric part of the serial | ? | LIKELY |
-| 0x26 / 0x35 / 0x60 / 0xA0 / 0xA1 / 0xD0 | constant | `01 00 05 03` / `00 6E 00 00` / `42 03 09 00` / `01 01 00 05` / `05 04 03 04` / `00 20 00 00` | — | UNRESOLVED |
+| 0x26 / 0x60 / 0xA0 / 0xA1 / 0xD0 | constant | `01 00 05 03` / `42 03 09 00` / `01 01 00 05` / `05 04 03 04` / `00 20 00 00` | — | UNRESOLVED |
 | 0x0C / 0xC0 / 0xE0 / 0xF0 / 0xF1 | `FF FF FF FF` or all zero | never move; candidate unsupported-parameter and alarm/fault slots | — | UNRESOLVED |
 
 > **Why 0x1B is read as panel voltage.** It looks like noise at first — 187 distinct values
@@ -150,9 +208,12 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
 
 ## Still to determine
 
-- **Behaviour while charging** (positive battery current). Still the biggest gap, and the
-  regime in which the fault under investigation occurs. It would settle three things at
-  once: 0x02 bit15=0, 0x34's H1 (time to full), and 0x35's high half.
+- **The unit of the 0x35 counters.** Direction is settled, and the first timestamped
+  capture measured 1.05 Wh across one clean inter-increment interval. Confirming 1 Wh/count
+  needs a capture under sustained load, where increments come often enough to average.
+- **The exact full-capacity figure the gauge uses for 0x34 H1.** Our four samples imply
+  1932 ± 60 Wh against a nominal 1920 Wh. Whether it uses the nominal figure or a learned
+  one would show up as drift in that number as the battery ages.
 - Whether 0xC0 / 0xF0 / 0xF1 / 0xF2 really are alarm bitmaps. They are all zero on a
   healthy bus, which is exactly what an alarm register looks like when nothing is wrong —
   and also exactly what an unused register looks like. **A capture taken during a power
