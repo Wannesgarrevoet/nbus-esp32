@@ -13,7 +13,7 @@
 // one that succeeded. Bump NBUS_FW_VERSION whenever flashing something you may
 // later need to distinguish.
 // ---------------------------------------------------------------------------
-#define NBUS_FW_VERSION  "0.4.3"
+#define NBUS_FW_VERSION  "0.4.4"
 #define NBUS_FW_BUILD    __DATE__ " " __TIME__
 
 // ---------------------------------------------------------------------------

@@ -568,8 +568,13 @@ void publishState() {
     if (s.batt_wh_valid)       doc["energy"]   = s.batt_wh;
     if (s.batt_quality_valid)  doc["quality"]  = s.batt_quality;
     if (s.batt_capacity_valid) doc["capacity"] = s.batt_capacity_ah;
-    if (s.batt_to_empty_valid)  doc["to_empty"]   = s.batt_to_empty_min;
-    if (s.batt_to_full_valid)   doc["to_full"]    = s.batt_to_full_min;
+    // These two alternate: 0x34 sends FFFF for whichever direction does not apply, so one
+    // of them is invalid at all times. Omitting the key would leave the template rendering
+    // an empty string, which Home Assistant treats as "no update" — the entity would then
+    // hold the last figure from the opposite direction indefinitely. An explicit null
+    // renders as "None", which does set the state to unknown.
+    if (s.batt_to_empty_valid) doc["to_empty"] = s.batt_to_empty_min; else doc["to_empty"] = nullptr;
+    if (s.batt_to_full_valid)  doc["to_full"]  = s.batt_to_full_min;  else doc["to_full"]  = nullptr;
     if (s.batt_discharged_valid) doc["discharged"] = s.batt_discharged_wh;
     if (s.batt_charged_valid)    doc["charged"]    = s.batt_charged_wh;
     if (s.batt_current_valid) {

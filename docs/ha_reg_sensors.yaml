@@ -1,0 +1,100 @@
+# Manual Home Assistant sensors for the undecoded registers.
+#
+# The firmware publishes every well-formed response it cannot decode to
+# nbus/reg/<NAD>/<REG> as eight uppercase hex characters, retained, and only when the
+# value actually changes. It deliberately publishes no discovery config for these:
+# naming an entity would claim a meaning that has not been established.
+#
+# That leaves the values visible in an MQTT client but absent from the recorder, and a
+# retained message carries no history. The registers below are the ones whose *history*
+# is the evidence — a bitmap that is zero today and non-zero for two seconds during the
+# fault is worthless unless something wrote down when it flipped. So they get sensors
+# here, by hand, with names that describe the address rather than a guessed meaning.
+#
+# Paste into configuration.yaml (merge under an existing `mqtt:` key if there is one)
+# and restart Home Assistant.
+#
+# Recorder default retention is 10 days. If the fault has not recurred by then the
+# history is gone, so raise `recorder.purge_keep_days` before relying on this.
+
+mqtt:
+  sensor:
+    # --- Battery 0x90: two 16-bit fields, both 270 on every capture so far. -----------
+    # The working hypothesis is two temperature sensors at 27.0 C. Splitting them is the
+    # test: under a sustained high current a FET or shunt sensor should climb away from a
+    # cell sensor. Treated as unsigned — if these ever read ~6500 in a frost the encoding
+    # is two's complement and the template needs the sign handling.
+    - name: "NBus battery 0x90 field A"
+      state_topic: "nbus/reg/85/90"
+      unique_id: nbus_reg_85_90_a
+      unit_of_measurement: "°C"
+      state_class: measurement
+      availability_topic: "nbus/status"
+      value_template: "{{ value[0:4] | int(base=16) / 10 }}"
+
+    - name: "NBus battery 0x90 field B"
+      state_topic: "nbus/reg/85/90"
+      unique_id: nbus_reg_85_90_b
+      unit_of_measurement: "°C"
+      state_class: measurement
+      availability_topic: "nbus/status"
+      value_template: "{{ value[4:8] | int(base=16) / 10 }}"
+
+    # --- Alarm-bitmap candidates ------------------------------------------------------
+    # All-zero on a healthy bus, which is indistinguishable from "unused" until one of
+    # them flips. Kept as raw hex strings: no unit, no device class, no interpretation.
+    - name: "NBus battery 0xC0 raw"
+      state_topic: "nbus/reg/85/C0"
+      unique_id: nbus_reg_85_c0
+      availability_topic: "nbus/status"
+
+    - name: "NBus battery 0xF1 raw"
+      state_topic: "nbus/reg/85/F1"
+      unique_id: nbus_reg_85_f1
+      availability_topic: "nbus/status"
+
+    - name: "NBus battery 0xF2 raw"
+      state_topic: "nbus/reg/85/F2"
+      unique_id: nbus_reg_85_f2
+      availability_topic: "nbus/status"
+
+    - name: "NBus solar 0xC0 raw"
+      state_topic: "nbus/reg/81/C0"
+      unique_id: nbus_reg_81_c0
+      availability_topic: "nbus/status"
+
+    - name: "NBus solar 0xF0 raw"
+      state_topic: "nbus/reg/81/F0"
+      unique_id: nbus_reg_81_f0
+      availability_topic: "nbus/status"
+
+    - name: "NBus solar 0xF1 raw"
+      state_topic: "nbus/reg/81/F1"
+      unique_id: nbus_reg_81_f1
+      availability_topic: "nbus/status"
+
+    # --- Battery 0x0C: constant 730, candidate cycle count ----------------------------
+    # If it is a cycle count it should tick up over weeks, which only a long trend shows.
+    - name: "NBus battery 0x0C value"
+      state_topic: "nbus/reg/85/0C"
+      unique_id: nbus_reg_85_0c
+      state_class: measurement
+      availability_topic: "nbus/status"
+      value_template: "{{ value[0:4] | int(base=16) }}"
+
+    # --- Solar 0x11 and 0x1C ----------------------------------------------------------
+    # Both move but neither tracks anything instantaneous; 0x11 lags the output badly.
+    # Plotted against solar current over a few days they either line up or they do not.
+    - name: "NBus solar 0x11 value"
+      state_topic: "nbus/reg/81/11"
+      unique_id: nbus_reg_81_11
+      state_class: measurement
+      availability_topic: "nbus/status"
+      value_template: "{{ value[0:4] | int(base=16) }}"
+
+    - name: "NBus solar 0x1C value"
+      state_topic: "nbus/reg/81/1C"
+      unique_id: nbus_reg_81_1c
+      state_class: measurement
+      availability_topic: "nbus/status"
+      value_template: "{{ value[0:4] | int(base=16) }}"
