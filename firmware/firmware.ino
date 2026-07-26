@@ -80,6 +80,11 @@ uint32_t g_lastHeartbeatMs = 0;
 bool     g_discoverySent   = false;
 uint8_t  g_mqttFailCount   = 0;
 
+// Up here rather than with the rest of the ring state further down, because the OTA
+// callbacks in setupWeb() touch both and are registered before that block.
+uint32_t g_lastFrameMs = 0;
+bool     g_otaActive   = false;
+
 // --------------------------------------------------------------------------
 // LED helpers
 // --------------------------------------------------------------------------
@@ -431,6 +436,15 @@ void onWifiUp() {
   httpServer.on("/raw/save",   HTTP_GET, handleRawSave);
   httpServer.on("/raw/files",  HTTP_GET, handleRawFiles);
   httpServer.on("/raw/file",   HTTP_GET, handleRawFile);
+  httpServer.on("/raw/clear",  HTTP_GET, handleRawClear);
+  // An upload starves the LIN reader for far longer than NBUS_RAW_SILENCE_MS, so without
+  // this the silence detector fires on every firmware update: a wasted flash write, and
+  // worse, a junk dump that evicts a real one from the NBUS_RAW_MAX_DUMPS slots.
+  ElegantOTA.onStart([]() { g_otaActive = true; });
+  ElegantOTA.onEnd([](bool success) {
+    g_otaActive = false;
+    g_lastFrameMs = millis();  // a failed upload leaves us running; don't fire on the gap
+  });
   ElegantOTA.begin(&httpServer);
   httpServer.begin();
   Serial.println(F("[ota] web server on :80 (/update)"));
@@ -660,7 +674,6 @@ void mirrorRegister(uint8_t nad, uint8_t reg, const uint8_t* d) {
 static RawEntry g_ring[NBUS_RAW_RING_ENTRIES];
 static uint32_t g_ringHead  = 0;   // next slot to write
 static uint32_t g_ringTotal = 0;   // frames ever recorded; also tells us whether we wrapped
-static uint32_t g_lastFrameMs = 0;
 static bool     g_busSilent = false;
 static uint32_t g_dumpSeq = 0;
 
@@ -709,8 +722,11 @@ void rawFsInit() {
 // Keep only the newest NBUS_RAW_MAX_DUMPS files. Sequence numbers are monotonic
 // across reboots (they live in NVS), so "lowest number" really is "oldest" —
 // millis() would not survive the very reset we are trying to record.
+// Bounded, and it gives up the moment a removal fails: this runs unattended from
+// rawPersist() at the exact moment of the fault, so spinning here would cost us the
+// capture the whole device exists to take.
 void rawPruneDumps() {
-  while (true) {
+  for (int guard = 0; guard < NBUS_RAW_MAX_DUMPS + 4; guard++) {
     File dir = LittleFS.open(NBUS_RAW_DUMP_DIR);
     if (!dir) return;
     int count = 0;
@@ -724,7 +740,7 @@ void rawPruneDumps() {
     }
     dir.close();
     if (count <= NBUS_RAW_MAX_DUMPS || lowestName.isEmpty()) return;
-    LittleFS.remove(String(NBUS_RAW_DUMP_DIR) + "/" + lowestName);
+    if (!LittleFS.remove(String(NBUS_RAW_DUMP_DIR) + "/" + lowestName)) return;
   }
 }
 
@@ -872,6 +888,54 @@ void handleRawFile() {
   if (!f) { httpServer.send(404, "text/plain", "no such dump\n"); return; }
   httpServer.streamFile(f, "text/plain");
   f.close();
+}
+
+// The only destructive endpoint here, and the file it deletes may be the sole record of
+// the fault this device exists to catch — so it demands confirm=yes rather than being
+// reachable by a stray click or a browser prefetching a link.
+//
+// g_dumpSeq is deliberately not reset: sequence numbers stay monotonic across a wipe, so
+// "highest number" remains "newest" and a cleared device cannot reuse the name of a dump
+// someone has already downloaded.
+void handleRawClear() {
+  if (!requireAuth()) return;
+  if (!g_fsReady) { httpServer.send(503, "text/plain", "fs unavailable\n"); return; }
+  if (httpServer.arg("confirm") != "yes") {
+    httpServer.send(400, "text/plain",
+                    F("refused: this deletes captured evidence\n"
+                      "  /raw/clear?confirm=yes           delete every dump\n"
+                      "  /raw/clear?confirm=yes&n=<name>  delete one\n"));
+    return;
+  }
+
+  if (httpServer.hasArg("n")) {
+    String name = httpServer.arg("n");
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    const String path = String(NBUS_RAW_DUMP_DIR) + "/" + name;
+    if (!LittleFS.exists(path)) { httpServer.send(404, "text/plain", "no such dump\n"); return; }
+    LittleFS.remove(path);
+    httpServer.send(200, "text/plain", "deleted " + name + "\n");
+    return;
+  }
+
+  // Reopen the directory for each removal, as rawPruneDumps() does: deleting through a
+  // live LittleFS directory handle while iterating it does not reliably enumerate. The
+  // entry must be closed before removing it — LittleFS refuses to unlink an open file,
+  // and an unbounded retry on that failure is a watchdog reset.
+  int removed = 0;
+  for (int guard = 0; guard < NBUS_RAW_MAX_DUMPS + 4; guard++) {
+    File dir = LittleFS.open(NBUS_RAW_DUMP_DIR);
+    if (!dir) break;
+    File f = dir.openNextFile();
+    String nm = f ? String(f.name()) : String();
+    if (f) f.close();
+    dir.close();
+    if (nm.isEmpty()) break;
+    if (!LittleFS.remove(String(NBUS_RAW_DUMP_DIR) + "/" + nm)) break;
+    removed++;
+  }
+  httpServer.send(200, "text/plain", "deleted " + String(removed) + " dump(s)\n");
 }
 
 // --------------------------------------------------------------------------
@@ -1051,7 +1115,7 @@ void loop() {
   // for a brownout handler: the bus simply stops answering and we calmly write
   // the preceding minutes to flash. Edge-triggered — one dump per silence, not
   // one per loop — and re-armed only once frames actually resume.
-  if (g_lastFrameMs) {
+  if (g_lastFrameMs && !g_otaActive) {
     const uint32_t age = millis() - g_lastFrameMs;
     if (!g_busSilent && age > NBUS_RAW_SILENCE_MS) {
       g_busSilent = true;
