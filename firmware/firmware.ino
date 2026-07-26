@@ -158,9 +158,31 @@ void maybeFactoryReset() {
 
 // The ESP's disconnect reason is the only thing that separates a wrong passphrase
 // (reason 15, 4-way handshake timeout) from an AP that refuses or drops us.
+// Every line carries millis() so the association attempts can be lined up against the
+// packet counters the router reports for this MAC.
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-    Serial.printf("[wifi] disconnected, reason %d\n", (int)info.wifi_sta_disconnected.reason);
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START:
+      Serial.printf("[wifi %8lu] STA started\n", millis());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      // Association + 4-way handshake done. Reaching this at all rules out the whole
+      // authentication class of faults; only DHCP can still fail after this point.
+      Serial.printf("[wifi %8lu] associated, ch %d, waiting for DHCP\n",
+                    millis(), (int)info.wifi_sta_connected.channel);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("[wifi %8lu] got IP\n", millis());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      Serial.printf("[wifi %8lu] lost IP\n", millis());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[wifi %8lu] disconnected, reason %d\n",
+                    millis(), (int)info.wifi_sta_disconnected.reason);
+      break;
+    default:
+      break;
   }
 }
 
@@ -188,6 +210,18 @@ void logVisibleNetworks() {
   Serial.printf("[wifi] stored SSID '%s', STA MAC %02X:%02X:%02X:%02X:%02X:%02X, hostname %s\n",
                 wm.getWiFiSSID().c_str(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                 NBUS_HOSTNAME);
+  // Length and character mix of the stored passphrase, never the passphrase itself.
+  // A mismatch with what was typed points at the portal form mangling a character.
+  const String pass = wm.getWiFiPass();
+  int nonAlnum = 0, nonAscii = 0;
+  for (size_t i = 0; i < pass.length(); ++i) {
+    const uint8_t c = (uint8_t)pass[i];
+    if (c < 32 || c > 126) ++nonAscii;
+    else if (!isalnum(c))  ++nonAlnum;
+  }
+  Serial.printf("[wifi] stored passphrase: %u chars, %d punctuation, %d non-ASCII\n",
+                (unsigned)pass.length(), nonAlnum, nonAscii);
+
   const int n = WiFi.scanNetworks();
   Serial.printf("[wifi] %d networks visible (2.4 GHz only):\n", n);
   for (int i = 0; i < n; ++i) {
@@ -236,6 +270,81 @@ void startProvisioning() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// MQTT settings page, served over the LAN on the device's own IP. The captive
+// portal exists for first-time Wi-Fi setup only; changing the broker afterwards
+// should not require dropping a working device back into AP mode.
+// ---------------------------------------------------------------------------
+String htmlEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); ++i) {
+    const char c = s[i];
+    if      (c == '&') out += F("&amp;");
+    else if (c == '<') out += F("&lt;");
+    else if (c == '>') out += F("&gt;");
+    else if (c == '"') out += F("&quot;");
+    else if (c == '\'') out += F("&#39;");
+    else               out += c;
+  }
+  return out;
+}
+
+void addField(String& p, const char* name, const char* label, const String& value,
+              const char* type) {
+  p += F("<label>");
+  p += label;
+  p += F("<input name='");
+  p += name;
+  p += F("' type='");
+  p += type;
+  p += F("' value='");
+  p += htmlEscape(value);
+  p += F("'></label>");
+}
+
+void handleConfigGet() {
+  String p = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+               "<title>N-Bus settings</title><style>"
+               "body{font-family:sans-serif;max-width:24em;margin:2em auto;padding:0 1em}"
+               "label{display:block;margin:.7em 0}"
+               "input{width:100%;padding:.4em;box-sizing:border-box}"
+               "button{padding:.6em 1.2em;margin-top:1em}</style>"
+               "<h2>MQTT settings</h2><form method='POST'>");
+  addField(p, "host", "Broker host (Home Assistant IP)", cfg.host, "text");
+  addField(p, "port", "Port", String(cfg.port), "number");
+  addField(p, "user", "Username", cfg.user, "text");
+  addField(p, "pass", "Password (blank = keep current)", "", "password");
+  addField(p, "base", "Base topic", cfg.base, "text");
+  p += F("<button type='submit'>Save &amp; reconnect</button></form>");
+  httpServer.send(200, "text/html", p);
+}
+
+void handleConfigPost() {
+  if (httpServer.hasArg("host")) cfg.host = httpServer.arg("host");
+  if (httpServer.hasArg("port")) cfg.port = httpServer.arg("port").toInt();
+  if (httpServer.hasArg("user")) cfg.user = httpServer.arg("user");
+  // An empty password field means "unchanged", so the other fields can be edited
+  // without having to retype the broker password.
+  if (httpServer.arg("pass").length()) cfg.pass = httpServer.arg("pass");
+  if (httpServer.hasArg("base")) cfg.base = httpServer.arg("base");
+  if (cfg.port == 0) cfg.port = 1883;
+  if (cfg.base.isEmpty()) cfg.base = NBUS_DEFAULT_BASE_TOPIC;
+  saveConfig();
+  Serial.printf("[cfg] saved MQTT %s:%u user '%s' base '%s'\n",
+                cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.base.c_str());
+
+  // Reconnect immediately with the new settings and re-announce discovery, so a
+  // changed base topic reaches Home Assistant without a reboot.
+  mqtt.disconnect();
+  g_discoverySent = false;
+  g_mqttFailCount = 0;
+  g_lastMqttTryMs = 0;
+  httpServer.send(200, "text/html",
+                  F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "<p>Saved — reconnecting to the broker.</p><p><a href='/config'>Back</a></p>"));
+}
+
 void onWifiUp() {
   if (g_shouldSaveConfig) {
     g_shouldSaveConfig = false;
@@ -259,8 +368,14 @@ void onWifiUp() {
     ElegantOTA.setAuth(cfg.otaUser.c_str(), cfg.otaPass.c_str());
   }
   httpServer.on("/", []() {
-    httpServer.send(200, "text/plain", "N-Bus camper bridge. OTA at /update");
+    httpServer.send(200, "text/html",
+                    F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+                      "<h2>N-Bus camper bridge</h2>"
+                      "<p><a href='/config'>MQTT settings</a></p>"
+                      "<p><a href='/update'>Firmware update</a></p>"));
   });
+  httpServer.on("/config", HTTP_GET, handleConfigGet);
+  httpServer.on("/config", HTTP_POST, handleConfigPost);
   ElegantOTA.begin(&httpServer);
   httpServer.begin();
   Serial.println(F("[ota] web server on :80 (/update)"));
@@ -508,6 +623,14 @@ void setup() {
 
   maybeFactoryReset();
   loadConfig();
+  // An unset broker host silently disables MQTT, which looks identical to a broker
+  // that refuses the connection. Say which of the two it is.
+  if (cfg.host.isEmpty()) {
+    Serial.println(F("[cfg] no MQTT broker configured - set one at http://<device-ip>/config"));
+  } else {
+    Serial.printf("[cfg] MQTT %s:%u, user '%s', base '%s'\n",
+                  cfg.host.c_str(), cfg.port, cfg.user.c_str(), cfg.base.c_str());
+  }
 
   // LIN UART: RX-only. TX pin is -1 — the bus is never driven.
   LinSerial.begin(NBUS_BAUD, SERIAL_8N1, NBUS_RX_PIN, NBUS_TX_PIN);
