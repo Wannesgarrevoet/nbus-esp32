@@ -18,13 +18,20 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
 - Decodes LIN-TP frames from the NDS bus (node 0x85 = battery, 0x81 = solar charger)
 - Publishes SoC, battery voltage/current, cell voltages, solar voltage/current,
   starter-battery voltage over MQTT
+- **Handles more than one battery pack.** Packs share NAD 0x85, so they cannot be told
+  apart by address; the frames are attributed by their **position in the poll cycle**
+  instead, and each pack appears in Home Assistant as its own device keyed on its
+  **serial number** — see [multiple packs](#multiple-battery-packs) below
 - Also decodes remaining energy (Wh), "quality" (SoH-like %) and nominal capacity (Ah) —
   these three come from a cross-check against a BLE reader for the same battery and are
   **not yet verified on our own bus**
+- Reads out device identity: serial number, model, bus address and firmware version per
+  node, all cross-checked against the Dometic Power app
 - Home Assistant MQTT auto-discovery (sensors appear automatically)
-- Republishes registers it cannot decode to `<base>/reg/<NAD>/<REG>` as raw hex, and
-  gives a hand-picked few of them their own entities named after the register address —
-  so a value that only matters the day it changes ends up in the recorder
+- Republishes registers it cannot decode as raw hex — `<base>/reg/85_<N>/<REG>` per pack,
+  `<base>/reg/81/<REG>` for the charger — and gives a hand-picked few of them their own
+  entities named after the register address, so a value that only matters the day it
+  changes ends up in the recorder
 - Wi-Fi + MQTT setup via **WiFiManager** captive portal (no credentials in the repo)
 - **Over-the-air updates** via a browser (ElegantOTA at `http://<device-ip>/update`)
 - Reusable, platform-independent parser (`NBusParser`) with host-side unit tests
@@ -71,6 +78,17 @@ Host-side parser tests build with a plain C++17 compiler:
 g++ -std=c++17 -I firmware test/test_parser.cpp firmware/NBusParser.cpp -o /tmp/t && /tmp/t
 ```
 
+There is a second harness that replays a **real bus capture** through the same parser and
+cycle tracker the firmware runs, and asserts that each poll slot carries exactly one serial
+number. Hand-built test vectors cannot catch a mis-split, because they encode the same
+assumption the code does; the replay is what tells you whether the split holds on the bus
+you actually have.
+
+```bash
+g++ -std=c++17 -I firmware test/replay_dump.cpp firmware/NBusParser.cpp -o /tmp/r
+/tmp/r capture.txt          # a file fetched from /raw/file?n=<name>
+```
+
 ## First-time setup
 
 1. Flash the firmware over USB once.
@@ -89,11 +107,44 @@ power and keep holding it for 3 seconds — the LED blinks while counting, then 
 six times to confirm. Releasing early keeps the settings. A reset triggered over USB
 never erases anything, so opening a serial monitor is always safe.
 
+## Multiple battery packs
+
+Every pack on the bus answers to the **same NAD (0x85)**. There is no address in the
+frame that distinguishes them, so a decoder written for one pack silently averages two.
+
+This firmware splits them by **ordinal position in the poll cycle**. The master polls the
+nodes in a fixed rotation; the charger's NAD 0x81 is unique, so its frames delimit the
+cycle, and the battery answers between two charger frames are pack 1, pack 2, … in order.
+Runs whose length does not match the learned cycle length are **discarded rather than
+attributed** — losing one sample in thousands costs nothing, while misattributing one
+quietly corrupts a register table. Splitting on inter-frame timing was tried first and
+abandoned: it leaked frames between packs, and it broke outright when a firmware update
+reshuffled the poll order.
+
+The cycle length is learned and re-learned, so a pack can be switched on or off while the
+device is running. When the length changes, everything held per slot is discarded — slot 1
+before the change and slot 1 after it are not the same pack.
+
+Each pack becomes its own Home Assistant device, identified by its **serial number**,
+because a firmware update was observed to change the bus addresses while leaving the
+serials alone. `<base>/cycle` publishes the learned cycle length together with the accepted
+and dropped frame counts, so the split can be audited from the outside.
+
+> **Breaking change.** Multi-pack support moved the MQTT topics:
+> `<base>/battery` → `<base>/battery/<N>`, and the raw register mirror `<base>/reg/85/<REG>`
+> → `<base>/reg/85_<N>/<REG>`. Home Assistant entity IDs now include the pack serial. If
+> you are upgrading and want to keep recorder history, rename the old entity IDs onto the
+> new entities before restarting, or the history is orphaned rather than lost.
+
 ## Status
 
-Reverse-engineering is functional for the core values (SoC, V, I, solar, starter).
-A few registers (remaining Wh, runtime estimate, exact cell mapping) are still being
-mapped — contributions welcome.
+Reverse-engineering is functional for the core values (SoC, V, I, solar, starter),
+for the energy counters and the time-to-full / time-to-empty estimates, and for device
+identity (serial, model, address, firmware version). Still open: the exact cell mapping,
+the candidate alarm registers — which read all zero on a healthy bus and so cannot be
+told apart from unused ones until something goes wrong — and registers 0x0C, 0x14 and
+0x90. Contributions welcome; `docs/NBUS_protocol_map.md` marks every entry with how
+strongly it is actually evidenced, including the ones that were wrong.
 
 ## Credits & related work
 
