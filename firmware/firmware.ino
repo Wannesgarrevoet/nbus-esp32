@@ -614,7 +614,7 @@ void publishRegDiscovery(int slot, const String& devSuffix, const String& devNam
 // silently started reporting the other pack.
 void publishBatteryDiscovery(int slot) {
   const NBusBattery& b = parser.state().batt[slot];
-  const String sfx  = String("b") + b.id.serial;              // e.g. bKAA2****53
+  const String sfx  = String("b") + b.id.serial;              // e.g. bKAA1234567
   const String name = String("Leisure battery ") + b.id.serial;
   const String sw   = b.id.fw_valid
                     ? String(b.id.fw_major) + "." + String(b.id.fw_minor) : String();

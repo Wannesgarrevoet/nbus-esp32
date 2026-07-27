@@ -95,9 +95,11 @@ removed instead of stalling on a length the bus no longer uses.
 registers, and with two packs interleaved on one bus a single shared pair of buffers will
 splice one pack's prefix onto the other's number. Each device needs its own halves.
 
-Replaying the five captures in `captures/` through this scheme puts exactly one serial
-number in each slot. See `test/replay_dump.cpp`, which is the check that matters — the
-hand-written unit vectors only prove the arithmetic, not the attribution.
+Replaying five real captures through this scheme puts exactly one serial number in each
+slot. See `test/replay_dump.cpp`, which is the check that matters — the hand-written unit
+vectors only prove the arithmetic, not the attribution. The captures themselves are kept
+out of this repository: they contain the devices' real serial numbers, and they are
+evidence about one particular installation rather than about the protocol.
 
 ## Device identity registers (both node types)
 
@@ -107,12 +109,18 @@ device page **before** decoding it: three devices × four fields, all twelve mat
 | reg | bytes | meaning | status |
 |-----|-------|---------|--------|
 | 0x54 | `idx K A A` | three ASCII characters, the serial prefix (`d1..d3`) | CONFIRMED (app + label) |
-| 0x55 | `idx n n n` | serial number, 24-bit big-endian in `d1..d3` (`** ** **` = 2****53) | CONFIRMED (app + label) |
+| 0x55 | `idx n n n` | serial number, 24-bit big-endian in `d1..d3` | CONFIRMED (app + label) |
 | 0x60 | `f0 00 A 00` | **`d2` = bus address** — the app's "Address" field: 1, 11, 13 | CONFIRMED (app) |
 | 0xA0 | `00 I Mh Ml` | `d1` = IAD, `d2 d3` = model number (battery 5/0008, charger 1/0005) | CONFIRMED (app) |
 | 0xA1 | `Ma mi x x` | **firmware version `d0`.`d1`** — 5.1 on the packs, 5.4 on the charger | CONFIRMED (app) |
 
-Serial `KAA` + 2****53 → **KAA2****53**, which matches the label on the pack.
+The prefix from 0x54 concatenated with the number from 0x55 reproduces the serial printed
+on the pack's label exactly, for all three devices.
+
+> Serial numbers are **redacted throughout this file** (`KAA2****53`) and the example frame
+> bytes in the tests are fictional. They identify specific hardware and have no bearing on
+> the protocol: what matters is the field layout, not the value in it. Substitute your own
+> when reproducing this.
 
 Three registers previously written off as "constant / UNRESOLVED identity" are therefore
 resolved. The lesson is worth keeping: they looked constant only because every capture was

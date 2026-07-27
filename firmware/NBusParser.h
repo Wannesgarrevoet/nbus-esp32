@@ -17,7 +17,7 @@ static constexpr uint8_t NBUS_NAD_SOLAR   = 0x81;  // solar charger (MPPT)
 // device. See NBusCycleTracker below for how they are told apart.
 static constexpr int NBUS_MAX_BATTERIES = 2;
 
-// Serial numbers are a 3-character prefix plus a number: "KAA2****53".
+// Serial numbers are a 3-character prefix plus a number: "KAA1234567".
 static constexpr int NBUS_SERIAL_LEN = 11;  // 10 characters + NUL
 
 // Identity fields every device on the bus reports, decoded from registers that were
@@ -178,7 +178,7 @@ public:
   // Increments whenever the learned cycle length changes, i.e. whenever a device joins
   // or leaves the bus. Slot N before the change and slot N after it are not the same
   // pack — observed directly in the capture where the second pack came online: the pack
-  // answering first went from KAA2****53 to KAA2****95 at that moment.
+  // answering first went from KAA1234567 to KAA7654321 at that moment.
   //
   // A slot's bus address (reg 0x60) also reveals the swap, but only when a 0x60 frame
   // happens along, which is seconds later. Anything published in between would carry

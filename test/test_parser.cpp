@@ -180,9 +180,14 @@ int main() {
     check_true("short frame rejected", !p.feedResponse(short_frame, sizeof short_frame));
   }
 
-  // --- Identity registers, verbatim from the post-update capture of pack 1.
+  // --- Identity registers, from the post-update capture of pack 1.
   // Every field below was read off the Dometic Power app's device page first, so this
   // vector is a direct app-vs-decoder comparison rather than a self-consistency check.
+  //
+  // The serial numbers here — and everywhere else in this file — are FICTIONAL. The real
+  // ones identify specific hardware and are deliberately not in this repository. Only the
+  // value is substituted: the byte layout, the split across 0x54/0x55 and the big-endian
+  // packing are exactly as captured, which is all the decoder is being tested on.
   {
     NBusParser p;
     const uint8_t prefix[] = {0x85, 0x06, 0xF4, 0x54, 0x00, 'K', 'A', 'A'};
@@ -195,7 +200,7 @@ int main() {
     // Half a serial is not a serial: nothing must be published until both halves are in.
     check_true("v14 serial withheld", !p.state().batt[0].id.serialValid());
     check_true("v14 number accepted", p.feedResponse(number, sizeof number, 0));
-    check_str("v14 serial", p.state().batt[0].id.serial, "KAA2****53");
+    check_str("v14 serial", p.state().batt[0].id.serial, "KAA1234567");
 
     check_true("v14 addr accepted", p.feedResponse(addr, sizeof addr, 0));
     check_int("v14 address", p.state().batt[0].id.address, 1);
@@ -222,8 +227,8 @@ int main() {
     p.feedResponse(pre1, sizeof pre1, 1);
     p.feedResponse(num1, sizeof num1, 1);
     p.feedResponse(num0, sizeof num0, 0);
-    check_str("v15 pack0 serial", p.state().batt[0].id.serial, "KAA2****53");
-    check_str("v15 pack1 serial", p.state().batt[1].id.serial, "KAA2****95");
+    check_str("v15 pack0 serial", p.state().batt[0].id.serial, "KAA1234567");
+    check_str("v15 pack1 serial", p.state().batt[1].id.serial, "KAA7654321");
 
     // Measurements must land in their own slot too.
     const uint8_t soc0[] = {0x85, 0x06, 0xF4, 0x0B, 0x4B, 0xFF, 0xFF, 0xFF};
@@ -254,7 +259,7 @@ int main() {
     p.feedResponse(prefix, sizeof prefix, 0);
     p.feedResponse(number, sizeof number, 0);
     check_int("v16 soc before", p.state().batt[0].soc, 75);
-    check_str("v16 serial before", p.state().batt[0].id.serial, "KAA2****53");
+    check_str("v16 serial before", p.state().batt[0].id.serial, "KAA1234567");
 
     p.feedResponse(addr11, sizeof addr11, 0);
     check_int("v16 address moved", p.state().batt[0].id.address, 11);
@@ -329,7 +334,7 @@ int main() {
   // --- Vector 18: a pack joining the bus must be noticed at once.
   // Taken from ring-accu2-online.txt, where the second pack came online mid-capture:
   // the cycle went from one battery response to two, and the pack answering first
-  // changed from KAA2****53 to KAA2****95. Position 0 means a different pack from that
+  // changed from KAA1234567 to KAA7654321. Position 0 means a different pack from that
   // moment on, so the epoch must move and the stale slots must be dropped.
   {
     NBusCycleTracker t;
@@ -396,13 +401,13 @@ int main() {
     p.feedResponse(sol, sizeof sol, 0);
     p.feedResponse(ssn, sizeof ssn, 0);
     p.feedResponse(snum, sizeof snum, 0);
-    check_str("v20 solar serial", p.state().solar.id.serial, "ACD2****99");
+    check_str("v20 solar serial", p.state().solar.id.serial, "ACD1112223");
 
     p.forgetBatteries();
     check_true("v20 pack0 cleared", !p.state().batt[0].soc_valid);
     check_true("v20 pack1 cleared", !p.state().batt[1].soc_valid);
     check_true("v20 solar kept", p.state().solar.valid);
-    check_str("v20 solar serial kept", p.state().solar.id.serial, "ACD2****99");
+    check_str("v20 solar serial kept", p.state().solar.id.serial, "ACD1112223");
   }
 
   std::printf("\n%s\n", g_failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED");
