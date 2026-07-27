@@ -214,7 +214,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the 75–76 range plus a constant 10. **Not state of charge** — see the correction below | ? | UNRESOLVED |
-| 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 x` on 5.1 | **not a constant** — see the correction below. Held 270/270 through everything on 4.x; on 5.1 the first three bytes are zero and `d3` is a small per-pack value that *moves*: the capture had accu 1 = 1 and accu 2 = 0 over 39 frames, a later live reading had 1 and 2 | — | UNRESOLVED |
+| 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 n` on 5.1 | **not a constant and not a temperature** — see the correction below. On 5.1 the first three bytes are zero and `d3` is a small per-pack number that matches the pack's **position in the poll cycle**: 1 on slot 1 and 2 on slot 2, in every one of 1364 consecutive complete cycles, without an exception. An earlier capture read 1 and 0, so the numbering is not fixed for all time | — | LIKELY for `d3` = poll-cycle index; `d0..d2` UNRESOLVED |
 | 0x0C | `02 EE FF FF` | always an exact multiple of 10, and **byte-identical on both packs** in every cycle of every two-pack capture, including moments when their SoCs are 26 points apart — so it is not pack-local. Over one day it read 730 → 740 → 750 and never fell. The earlier reading that its centre rises with SoC does not survive that; see the correction below | ? | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per device, and is a state rather than a constant.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 has read 0 in every capture except the ~2 minutes right after its own firmware update, where it read 2 and then fell back to 0 — the transition is in the capture. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A before the update while reading 0 | — | UNRESOLVED |
@@ -233,6 +233,27 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > The general lesson is the one recorded under the identity registers: **a field that never
 > moves is unexplained, not explained.** The confident reading and the correct reading were
 > distinguishable only by data that did not exist yet.
+
+> **`d3` of 0x90 is probably the pack's index in the poll cycle.** A live capture of 4096
+> frames on 2026-07-28 split into 1364 runs, every one of them exactly two frames long, so
+> nothing had to be dropped and nothing was merged. Across it 0x90 read `00 00 00 01` on
+> slot 1 (37 frames) and `00 00 00 02` on slot 2 (36 frames), with no third value anywhere.
+> It sits alongside 0x0B, 0x54, 0x55 and 0x60 as one of five registers that are constant
+> within a pack and differ between packs.
+>
+> That would make it the first field in the protocol that states the split **from inside**.
+> Everything else here attributes frames from the outside — by counting position between
+> two charger frames — and is checked against the serial, which arrives only once per poll
+> of 0x54 and 0x55. A per-frame index would confirm the same split on every frame.
+>
+> It is LIKELY rather than CONFIRMED because it is one capture of one bus topology, and
+> because an earlier capture read 1 and **0**, which this reading does not explain. The test
+> that settles it is to power one pack down and back up so the poll order changes: if `d3`
+> follows the new position it is an index the master hands out, and it can be used to
+> *verify* the ordinal split but never to replace it; if it stays with its pack it is a
+> device property, and then it identifies a pack on every single frame. The second outcome
+> is the valuable one, so the test is worth doing deliberately rather than waiting for it to
+> happen by accident.
 
 > **Correction: 0x14 is not per-cell state of charge, and 0x0C does not track state of charge.**
 > Both readings were written down while the two packs were still being averaged into a single
@@ -405,6 +426,65 @@ The tool re-checks the LIN classic checksum itself and drops anything that fails
 noisy tap cannot invent a register. The 300 s capture behind the entries above yielded
 1564 frames with **1** checksum reject.
 
+### The signals that are not on the bus
+
+A capture is five minutes long; the registers that are still unresolved move over hours.
+Those get settled in Home Assistant's recorder instead, and the useful part is that the
+recorder also holds **context the N-Bus does not carry**. The bus says how much current is
+flowing but not *why*, and "why" is usually what separates two candidate meanings.
+
+The Victron **Orion XS** DC-DC charger is read by Home Assistant directly over BLE and
+supplies exactly that. Its entity IDs embed the charger's own serial, written `<serial>`
+here:
+
+| entity | tells you |
+|--------|-----------|
+| `sensor.orion_xs_<serial>_input_voltage` | alternator voltage — **≈0 V parked, ≈14 V with the engine running.** The cleanest "is the vehicle driving" signal available |
+| `sensor.orion_xs_<serial>_charge_state` | `off` / bulk / absorption / float — which charge stage the living bank is being driven through |
+| `sensor.orion_xs_<serial>_output_voltage` | what the DC-DC is imposing on the bank, independent of what the packs report |
+| `sensor.orion_xs_<serial>_off_reason` | why it is not charging (`no_input_power` when parked) |
+
+So the bank has **three** current sources — alternator via the Orion XS, solar via NAD 0x81,
+and mains when hooked up — and the packs' 0x02 only shows the sum. Anything that correlates
+with "charging" should be checked against which source is actually running before it is
+written down: a register that tracks absorption voltage and a register that tracks solar
+yield look identical if every capture happens to be taken while driving.
+
+The pending 0x14 test needs this. "Charge to absorption and see whether 0x14 climbs while
+0x0B barely moves" is a Victron `charge_state` transition, not something the N-Bus
+announces.
+
+### The Westfalia bus, and an independent meter on the same bank
+
+The Ford/Westfalia body bus is a **separate LIN bus with its own wiring**, read by a second
+listener that also publishes into Home Assistant (`sensor.nugget_lin_listener_*`). It has
+nothing to do with the NDS N-Bus at the protocol level — but it is wired to the same
+battery, and that makes it the closest thing to ground truth this project has.
+
+**Its IBS sits on the leisure bank, not on the starter battery.** Measured over 30 h and
+2227 sample pairs, `orion_xs_..._output_voltage` minus `nugget_lin_listener_ibs_spanning`
+is **+0.118 V with a standard deviation of 0.024 V** — a fixed cable drop between the
+charger's terminals and the battery post, not two different batteries drifting apart. The
+IBS current also peaks at **+54.5 A**, matching the ~49.7 A the N-Bus packs reported during
+the same drive. Same bank, two independent meters.
+
+What that buys:
+
+| `sensor.nugget_lin_listener_…` | what it is worth here |
+|---|---|
+| `ibs_stroom` | **bank current from outside the BMS**, ~2 Hz. `pack1 0x02 + pack2 0x02` has to equal it. That is a direct test of the ordinal split and of the 0.01 A scaling, and any residual is a load or source wired past the shunt |
+| `ibs_temperatuur` | **a battery temperature that actually moves**: 22 → 31 °C over the drive, and it does *not* follow cabin air (31 °C while inside was 23.5 °C). This is the reference curve to test any N-Bus register against — anything claiming to be pack temperature must track this, not the cabin |
+| `binnentemperatuur` / `buitentemperatuur` | the control for the above: a register following cabin air is not measuring the battery |
+| `ibs_spanning` | second opinion on bank voltage, offset known and constant |
+| `ibs_soc` / `ibs_soh` / `ibs_max_capaciteit` | a Ford lead-acid gauge applied to LiFePO4 (it settles on 190 Ah against the packs' 2 × 150 Ah), so not truth — but its *shape* over a cycle is still a comparison |
+| `ontsteking`, `motor` | ignition and engine state, independent of the Victron input voltage |
+| `compressor`, `waterpomp`, `kraan`, `verwarming_*` | which load just switched — the step in bank current has a named cause |
+
+The temperature line is the important one. The search for a temperature register on the
+N-Bus failed so far because there was nothing to correlate against; with `ibs_temperatuur`
+recording a real thermal curve, any candidate register can be tested against a day that
+contains a 50 A charge instead of against a guess about what 27.0 °C should look like.
+
 ## Still to determine
 
 - Whether 0xC0 / 0xF0 / 0xF1 / 0xF2 really are alarm bitmaps. They are all zero on a
@@ -428,13 +508,15 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
   pack voltage — the one input the two packs genuinely share, since they sit in parallel —
   is the obvious next test, and a charge to absorption voltage would answer it: a
   voltage-derived figure has to move a long way while 0x0B barely moves at all.
-- **What `d3` of 0x90 is.** On firmware 5.1 the register reads `00 00 00 x` with a small
-  per-pack `x`. The capture showed 1 on pack 1 and 0 on pack 2, stable across all 39 frames,
-  which looked like a fixed per-pack flag; a later live reading showed 1 and **2**, so it is
-  not fixed. It is small, per-pack and slow-moving — a state or a count, not an identifier.
-  What matters is that it is per-pack at all, which the old "constant 270" reading obscured
-  completely. Noting it here rather than quietly correcting the earlier sentence: a value
-  that appears stable in one capture is only evidence that it is slow.
+- **Whether `d3` of 0x90 belongs to the pack or to the slot.** It now reads 1 and 2 in poll
+  order across 1364 consecutive cycles, which is why it is marked LIKELY as a poll-cycle
+  index. The open half is what happens when the order changes: power one pack down and back
+  up, and either `d3` follows the new position — an index the master assigns — or it stays
+  with its pack, in which case it identifies a pack on every frame instead of once per
+  identity poll. Until that test is run, it may be read but must not be used to attribute
+  frames; that would be circular, since the reading was derived from the attribution.
+  Note also that an earlier capture read 1 and **0**, which the index hypothesis does not
+  yet account for.
 - Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
   cruder SoC estimate alongside the battery's coulomb-counted 56 %.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE

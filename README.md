@@ -98,9 +98,14 @@ g++ -std=c++17 -I firmware test/replay_dump.cpp firmware/NBusParser.cpp -o /tmp/
 
 After that, update wirelessly at `http://<device-ip>/update`.
 
-No YAML is needed for any of the sensors, including the raw register ones. If you are
-using those to catch a rare fault, raise `recorder.purge_keep_days` first: the default
-keeps ten days of history, which is easily shorter than the interval between events.
+No YAML is needed for any of the sensors, including the raw register ones. One detail is
+worth knowing before you tune `recorder.purge_keep_days`: a register published as a hex
+string gets no long-term statistics, so it lives exactly as long as the retention window,
+while a numeric one carries `state_class: measurement` and keeps an hourly min/max
+indefinitely. Every raw-hex register therefore also appears as a `… value` entity holding
+the same four bytes as one 32-bit number. It is unitless — a bit pattern, not a quantity —
+but it means a short retention costs only the fine detail, and a bit that flips for two
+seconds survives in that hour's maximum long after the states themselves are purged.
 
 To wipe the stored Wi-Fi and MQTT settings, hold the **BOOT** button while applying
 power and keep holding it for 3 seconds — the LED blinks while counting, then flashes

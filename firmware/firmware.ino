@@ -528,10 +528,11 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
 // Discovery for a hand-picked set of registers the parser does not decode.
 //
 // The mirror republishes every undecoded register, but most of them never move and would
-// only clutter Home Assistant. The ones here are those whose *history* is the evidence: a
-// bitmap that reads zero today and non-zero for two seconds during the fault proves
-// nothing unless something recorded when it flipped, and a retained MQTT message holds one
-// value, not a history. Getting them into the recorder is the whole point.
+// only clutter Home Assistant. The ones here are those whose *history* is the evidence:
+// what a slow register means only shows up in how it moves across a charge cycle or a
+// drive, and a retained MQTT message holds one value, not a history. Getting them into the
+// recorder is the whole point — it is what settled 0x35 and what killed two register
+// readings that had looked solid for years.
 //
 // Naming them after their address rather than a guess is what keeps this honest — the
 // entity claims a register, not a meaning. That is also why an empty template leaves the
@@ -562,6 +563,20 @@ const RegSensor kRegSensors[] = {
   { "reg_81_c0", 0x81, 0xC0, "0xC0 raw", "", "", "" },
   { "reg_81_f0", 0x81, 0xF0, "0xF0 raw", "", "", "" },
   { "reg_81_f1", 0x81, 0xF1, "0xF1 raw", "", "", "" },
+
+  // The same seven registers a second time, as the 32-bit number the hex spells out. The
+  // hex entity stays because it is what you read in the UI; this one exists because a
+  // string gets no long-term statistics and so lives exactly as long as the recorder
+  // retention. These carry state_class, so Home Assistant keeps an hourly min/max forever:
+  // a bit that flips for two seconds is preserved in that hour's maximum and is still
+  // there a year later. Unitless on purpose — the number is a bit pattern, not a quantity.
+  { "reg_85_90_n", 0x85, 0x90, "0x90 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_85_c0_n", 0x85, 0xC0, "0xC0 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_85_f1_n", 0x85, 0xF1, "0xF1 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_85_f2_n", 0x85, 0xF2, "0xF2 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_81_c0_n", 0x81, 0xC0, "0xC0 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_81_f0_n", 0x81, 0xF0, "0xF0 value", "{{ value | int(base=16) }}", "", "measurement" },
+  { "reg_81_f1_n", 0x81, 0xF1, "0xF1 value", "{{ value | int(base=16) }}", "", "measurement" },
 
   // Recorded as a constant 730 for as long as captures were 5.5 minutes long; the first
   // day of real history put it at 740. Candidate cycle count. Both packs report the same
@@ -824,11 +839,12 @@ void publishState() {
 // Raw register mirror
 //
 // Registers the parser understands become named sensors above. Everything else would
-// otherwise be discarded, and that is precisely the data a post-mortem needs: on a
-// healthy bus the candidate alarm registers (0xC0, 0xF0, 0xF1, 0xF2) are all zero, which
-// looks exactly like an unused register. Only a capture taken while the fault is
-// happening can tell those apart, and the fault is intermittent — so it has to be
-// recorded continuously, unattended.
+// otherwise be discarded, and the undecoded ones are exactly the ones still being worked
+// out — a register cannot be identified from a value, only from how it moves against
+// everything else. Some of them will not move for weeks: on a healthy bus the candidate
+// alarm registers (0xC0, 0xF0, 0xF1, 0xF2) are all zero, which looks exactly like an
+// unused register, so they have to be recorded continuously and unattended to ever be
+// told apart.
 //
 // Each pair gets its own retained topic, so the broker timestamps every change for free
 // and a constant register costs one message ever. No discovery config is published:
@@ -949,8 +965,8 @@ void rawFsInit() {
 // across reboots (they live in NVS), so "lowest number" really is "oldest" —
 // millis() would not survive the very reset we are trying to record.
 // Bounded, and it gives up the moment a removal fails: this runs unattended from
-// rawPersist() at the exact moment of the fault, so spinning here would cost us the
-// capture the whole device exists to take.
+// rawPersist() just as the bus goes quiet, and spinning here would cost the capture
+// it was called to write.
 void rawPruneDumps() {
   for (int guard = 0; guard < NBUS_RAW_MAX_DUMPS + 4; guard++) {
     File dir = LittleFS.open(NBUS_RAW_DUMP_DIR);
@@ -1130,8 +1146,8 @@ void handleRawFile() {
   f.close();
 }
 
-// The only destructive endpoint here, and the file it deletes may be the sole record of
-// the fault this device exists to catch — so it demands confirm=yes rather than being
+// The only destructive endpoint here, and the file it deletes may be the sole capture of
+// a bus state that took weeks to occur — so it demands confirm=yes rather than being
 // reachable by a stray click or a browser prefetching a link.
 //
 // g_dumpSeq is deliberately not reset: sequence numbers stay monotonic across a wipe, so
@@ -1384,11 +1400,11 @@ void loop() {
     }
   }
 
-  // Bus silence is the trigger for everything this device was built to catch.
-  // On a powerbank the ESP outlives the fault, so there is no rush and no need
-  // for a brownout handler: the bus simply stops answering and we calmly write
-  // the preceding minutes to flash. Edge-triggered — one dump per silence, not
-  // one per loop — and re-armed only once frames actually resume.
+  // Bus silence is the write trigger: the ring is flushed when there is nothing
+  // left to lose by writing. No brownout handler and no hurry — if the ESP loses
+  // power along with the bus the dump is simply not written, which is acceptable
+  // now that the device is a decoder rather than a fault recorder. Edge-triggered —
+  // one dump per silence, not one per loop — and re-armed only once frames resume.
   if (g_lastFrameMs && !g_otaActive) {
     const uint32_t age = millis() - g_lastFrameMs;
     if (!g_busSilent && age > NBUS_RAW_SILENCE_MS) {

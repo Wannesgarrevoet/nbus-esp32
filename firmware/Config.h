@@ -13,7 +13,7 @@
 // one that succeeded. Bump NBUS_FW_VERSION whenever flashing something you may
 // later need to distinguish.
 // ---------------------------------------------------------------------------
-#define NBUS_FW_VERSION  "0.5.1"
+#define NBUS_FW_VERSION  "0.5.2"
 #define NBUS_FW_BUILD    __DATE__ " " __TIME__
 
 // ---------------------------------------------------------------------------
@@ -77,10 +77,12 @@
 #define NBUS_PUBLISH_MS        5000    // min interval between state publishes
 #define NBUS_STALE_MS          30000   // mark a value stale if not refreshed within
 
-// Mirror of registers the parser does NOT decode, republished raw so that a fault leaves
-// a trace even in registers whose meaning is still unknown. Several candidate alarm
-// registers read all-zero on a healthy bus, which is indistinguishable from "unused"
-// until the day one of them flips — and that day is the whole point of this device.
+// Mirror of registers the parser does NOT decode, republished raw so Home Assistant's
+// recorder timestamps every change. This is the main instrument for decoding the rest of
+// the bus: the ring buffer holds minutes, the recorder holds weeks, and the slow registers
+// only give themselves away over a charge cycle or a drive. It also means a candidate
+// alarm register — all-zero and so indistinguishable from an unused one on a healthy
+// bus — leaves a trace on the day it flips.
 // Keyed on (device, reg), where the two battery packs count as separate devices — they
 // share NAD 0x85, so keying on the NAD alone would have them overwrite each other's
 // registers. Two packs of ~24 registers plus ~18 for the charger is ~66 in the captures.
@@ -97,16 +99,17 @@
 // ---------------------------------------------------------------------------
 // Raw frame ring buffer.
 //
-// The point of this device is to be watching at the moment the power fails, and
-// the interesting data is what happened in the seconds BEFORE the bus went quiet.
-// So frames go into a RAM ring continuously and are only written to flash once
-// the bus stops talking — writing every frame would destroy the flash in days.
+// Raw frames are what the protocol work runs on: a capture pulled over the network
+// replays off-device through the same parser the firmware uses. Frames go into a RAM
+// ring continuously and are written to flash only once the bus stops talking — writing
+// every frame would destroy the flash in days. Flushing on silence also means the
+// minutes leading up to a bus dropout survive it.
 //
 // 12 bytes per entry (4-byte millis + the 8 payload bytes; the checksum is
 // already verified by then and carries no information worth storing).
 // 4096 entries = 48 KB of RAM and, at the ~12 frames/s this bus actually runs at,
-// about 5.5 minutes of history. That window is the design parameter: it has to be
-// long enough to contain whatever precedes the disconnect.
+// about 5.5 minutes of history — long enough to hold several full poll cycles of every
+// register on the bus, which is what a capture has to contain to be worth analysing.
 // ---------------------------------------------------------------------------
 #define NBUS_RAW_RING_ENTRIES  4096
 #define NBUS_RAW_SILENCE_MS    5000    // no valid frame this long ⇒ bus considered dead
