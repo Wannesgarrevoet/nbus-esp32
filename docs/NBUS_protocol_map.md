@@ -165,16 +165,17 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the same range as SoC and differing per pack (accu 1 `4C 4B 4C 0A` = 76/75/76, accu 2 `4B 4B 4B 0A` = 75/75/75), plus a constant 10. Per-cell or per-string SoC is the obvious reading, but three values for a four-cell pack does not fit it | ? | UNRESOLVED |
-| 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 x` on 5.1 | **not a constant** — see the correction below. Held 270/270 through everything on 4.x; on 5.1 the first three bytes are zero and `d3` differs per pack (accu 1 = 1, accu 2 = 0, each perfectly stable over 39 frames) | — | UNRESOLVED |
+| 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 x` on 5.1 | **not a constant** — see the correction below. Held 270/270 through everything on 4.x; on 5.1 the first three bytes are zero and `d3` is a small per-pack value that *moves*: the capture had accu 1 = 1 and accu 2 = 0 over 39 frames, a later live reading had 1 and 2 | — | UNRESOLVED |
 | 0x0C | `02 E4 FF FF` | not a constant and not a counter: sits on a multiple of 10, dithers one step either way, and the centre rises with state of charge (740 at 50 %, 780 at 73 %). **Both packs report byte-identical values** in every cycle of the post-update capture, at moments when 0x14 differs between them — so whatever it measures is not pack-local | ? | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
-| 0xF2 | `00 02 00 00` | constant 2 | — | UNRESOLVED |
+| 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per pack** — was read as a constant 2 while both packs were being averaged into one entity. Whatever it is, it is pack-local, unlike 0x0C | — | UNRESOLVED |
 
 > **Correction: 0x90 is not a constant, and it is not two temperature sensors.**
 > On firmware 4.x this register read `01 0E 01 0E` — two identical 16-bit values of 270 —
 > which is why it was read here as two sensors at 27.0 °C. It was then downgraded to
 > DOUBTED because both halves held exactly 270 through a 504 Wh charge at up to 49.7 A.
-> After the update to 5.1 it reads **all zero on both packs**. A constant does not change
+> After the update to 5.1 it reads **zero in the first three bytes on both packs**, with only
+> a small per-pack value left in `d3`. A constant does not change
 > across a firmware update, so the "constant" reading was wrong too; the °C interpretation
 > was never anything more than a plausible scaling of a number that never moved. It is now
 > mirrored raw by the firmware with no unit attached, and the claim should be withdrawn
@@ -353,10 +354,13 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
   when the packs were updated — but these packs have four cells, not three, and the fourth
   byte is not in range. Watching whether the three bytes track 0x0B during a deep discharge
   would settle it.
-- **What `d3` of 0x90 is.** On firmware 5.1 the register reads `00 00 00 x` with `x` = 1 on
-  pack 1 and 0 on pack 2, each stable across every frame of the capture. A per-pack flag
-  that never changed value in one capture tells us nothing about what it flags — but it is
-  now known to be per-pack, which the old "constant 270" reading obscured completely.
+- **What `d3` of 0x90 is.** On firmware 5.1 the register reads `00 00 00 x` with a small
+  per-pack `x`. The capture showed 1 on pack 1 and 0 on pack 2, stable across all 39 frames,
+  which looked like a fixed per-pack flag; a later live reading showed 1 and **2**, so it is
+  not fixed. It is small, per-pack and slow-moving — a state or a count, not an identifier.
+  What matters is that it is per-pack at all, which the old "constant 270" reading obscured
+  completely. Noting it here rather than quietly correcting the earlier sentence: a value
+  that appears stable in one capture is only evidence that it is slow.
 - Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
   cruder SoC estimate alongside the battery's coulomb-counted 56 %.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
