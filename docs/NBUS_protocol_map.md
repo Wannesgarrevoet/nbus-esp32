@@ -215,7 +215,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the 75–76 range plus a constant 10. **Not state of charge** — see the correction below | ? | UNRESOLVED |
 | 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 n` on 5.1 | **not a constant and not a temperature** — see the correction below. On 5.1 the first three bytes are zero and `d3` is a small per-pack number that matches the pack's **position in the poll cycle**: 1 on slot 1 and 2 on slot 2, in every one of 1364 consecutive complete cycles, without an exception. An earlier capture read 1 and 0, so the numbering is not fixed for all time | — | LIKELY for `d3` = poll-cycle index; `d0..d2` UNRESOLVED |
-| 0x0C | `02 EE FF FF` | always an exact multiple of 10, and **byte-identical on both packs** in every cycle of every two-pack capture, including moments when their SoCs are 26 points apart — so it is not pack-local. Over one day it read 730 → 740 → 750 and never fell. The earlier reading that its centre rises with SoC does not survive that; see the correction below | ? | UNRESOLVED |
+| 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`, always an exact multiple of 10. **Per-pack, and it dithers.** On 2026-07-28 one pack held 740 unbroken while the other alternated 740/730 nine times in twenty seconds and settled on 730. Earlier captures where it was byte-identical on both packs are explained by both sitting in the same bucket, not by it being a shared figure. Neither an SoC reading nor a counter — see the corrections below | ? | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per device, and is a state rather than a constant.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 has read 0 in every capture except the ~2 minutes right after its own firmware update, where it read 2 and then fell back to 0 — the transition is in the capture. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A before the update while reading 0 | — | UNRESOLVED |
 
@@ -268,14 +268,18 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > state, and the ±1 wander is shared between packs rather than independent.
 >
 > 0x0C was read as rising with SoC, on 740 at 50 % and 780 at 73 %. Across a day of captures
-> it read 730 (SoC 64), 730 (66), 740 (71), 750 (73) and 750 (73) — and it is byte-identical
-> on two packs whose SoCs are 73 and 99. It moves in exact steps of 10 and, over that whole
-> day, only upward. That is the shape of a slowly accumulating quantity that happens to
-> correlate with SoC on a day when SoC was also rising, not of an SoC reading.
+> it read 730 (SoC 64), 730 (66), 740 (71), 750 (73) and 750 (73), and in every one of those
+> it was byte-identical on two packs whose SoCs are 73 and 99. That is what kills the SoC
+> reading, and it is the part of this paragraph that still stands.
 >
-> **The test that separates these.** Both hypotheses now make a prediction that a deep
-> discharge falsifies in one direction or the other: an SoC-like field must come back down,
-> an accumulator cannot. Neither register has yet been watched through one.
+> What was put in its place — a slowly accumulating quantity, shared by both packs — did not
+> survive either, and it took two separate observations to finish it off. It reverses, so it
+> accumulates nothing (see the drive note further down). And it is **not shared**: on
+> 2026-07-28 the two packs read 740 and 730 at the same moment.
+>
+> **The test that separates these.** A deep discharge still discriminates for 0x14: an
+> SoC-like field must come back down, an accumulator cannot. For 0x0C the accumulator
+> reading is already dead, and the open question is narrower — see below.
 >
 > The methodological point is the reason multi-pack support was worth building at all. A
 > second, nominally identical device on the same bus is a control. Two of the register
@@ -493,13 +497,19 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   loss would separate the two**, which makes them worth publishing to MQTT even unnamed.
   They stayed zero throughout the 2026-07-26 drive, including engine cranking, so they are
   at least not set by ordinary events.
-- **What 0x0C is.** It sits on an exact multiple of 10 and is **byte-identical on both packs
-  in every cycle** while their SoC (0x0B) is 26 points apart, so it is not pack-local: either
-  a bus-level or bank-level figure that both nodes echo, or something the packs derive from a
-  shared input. Across one day it read 730 → 740 → 750 and never fell. Both earlier readings
-  are now dead — not a cycle counter, and not SoC-following either. What is left is a slow,
-  coarse, shared quantity, and the single measurement that would separate an accumulator from
-  a state is a **deep discharge**: an accumulator cannot come back down.
+- **What 0x0C is.** It sits on an exact multiple of 10, and that quantisation is the most
+  solid thing known about it. Three readings have now been retracted: not a cycle counter,
+  not SoC-following, and — as of 2026-07-28 — not shared between the packs either. In one
+  six-minute window one pack held 740 across 79 samples without a single flip while the
+  other alternated 740/730 nine times in twenty seconds and settled on 730, with the
+  lower-SoC pack reading the higher value. The earlier captures where both packs matched
+  byte for byte are explained by both sitting in the same bucket of ten, not by a shared
+  figure. It also reverses, so it accumulates nothing. What is left is a per-pack quantity,
+  coarse enough that a step of ten is its smallest move, that can sit exactly on a boundary
+  and dither across it. The open question is no longer *shared or local* but **what quantity
+  is quantised that coarsely** — a capacity or resistance estimate in units of ten would fit
+  the dithering; a slowly filtered measurement would not, because the filter would show
+  intermediate values.
 - **What 0x14 is** (new in firmware 5.1, absent on 4.x). Three bytes in the 75–76 range plus
   a constant 10. It is **not** per-cell state of charge: the pack at 99 % reports the same
   75–76 as the pack at 73 %, and in the latest capture both packs report the identical
