@@ -13,30 +13,71 @@
 static constexpr uint8_t NBUS_NAD_BATTERY = 0x85;  // leisure battery (Tempra)
 static constexpr uint8_t NBUS_NAD_SOLAR   = 0x81;  // solar charger (MPPT)
 
-// Decoded snapshot of the bus. Each group carries a validity flag so consumers can
-// tell fresh data from never-seen / stale registers.
-struct NBusState {
-  // Battery (NAD 0x85)
-  float batt_voltage = 0.0f;  bool batt_voltage_valid = false;
-  float batt_current = 0.0f;  bool batt_current_valid = false;  // negative = discharging
-  int   batt_soc     = 0;     bool batt_soc_valid     = false;
-  int   batt_wh      = 0;     bool batt_wh_valid      = false;  // remaining energy (Wh)
-  int   batt_quality = 0;     bool batt_quality_valid = false;  // "quality" / SoH-like (%)
-  int   batt_capacity_ah = 0; bool batt_capacity_valid = false; // nominal capacity (Ah)
+// Two Tempra packs share NAD 0x85 — the NAD identifies the device *type*, not the
+// device. See NBusCycleTracker below for how they are told apart.
+static constexpr int NBUS_MAX_BATTERIES = 2;
+
+// Serial numbers are a 3-character prefix plus a number: "KAA2****53".
+static constexpr int NBUS_SERIAL_LEN = 11;  // 10 characters + NUL
+
+// Identity fields every device on the bus reports, decoded from registers that were
+// confirmed against the Dometic Power app's device page (serial, IAD, model, firmware)
+// and against the physical labels on the packs (serial).
+struct NBusIdentity {
+  char     serial[NBUS_SERIAL_LEN] = {0};  // empty until BOTH 0x54 and 0x55 have arrived
+  uint8_t  address = 0;                    // reg 0x60 D2 — the app's "Address" field
+  bool     address_valid = false;
+  uint8_t  fw_major = 0, fw_minor = 0;     // reg 0xA1 D0.D1
+  bool     fw_valid = false;
+  uint8_t  iad = 0;                        // reg 0xA0 D1
+  uint16_t model = 0;                      // reg 0xA0 D2D3
+  bool     model_valid = false;
+
+  bool serialValid() const { return serial[0] != '\0'; }
+
+  // Serial arrives split over two registers, so both halves are held until they can
+  // be joined. Kept here rather than in the parser so that each device accumulates
+  // its own halves — with two packs interleaved on one bus, a single shared pair of
+  // buffers would splice one pack's prefix onto the other's number.
+  char     prefix[4] = {0};
+  uint32_t number = 0;
+  bool     have_prefix = false, have_number = false;
+};
+
+// One battery pack. Each group carries a validity flag so consumers can tell fresh
+// data from never-seen registers.
+struct NBusBattery {
+  NBusIdentity id;
+
+  float voltage = 0.0f;  bool voltage_valid = false;
+  float current = 0.0f;  bool current_valid = false;  // negative = discharging
+  int   soc     = 0;     bool soc_valid     = false;
+  int   wh      = 0;     bool wh_valid      = false;  // remaining energy (Wh)
+  int   quality = 0;     bool quality_valid = false;  // "quality" / SoH-like (%)
+  int   capacity_ah = 0; bool capacity_valid = false; // nominal capacity (Ah)
   // Register 0x34 carries both runtime estimates; the one that does not apply to the
   // current direction of travel reads 0xFFFF, so each half needs its own validity flag.
-  int   batt_to_empty_min = 0; bool batt_to_empty_valid = false;
-  int   batt_to_full_min  = 0; bool batt_to_full_valid  = false;
+  int   to_empty_min = 0; bool to_empty_valid = false;
+  int   to_full_min  = 0; bool to_full_valid  = false;
   // Register 0x35: lifetime energy counters, one count per Wh.
-  int   batt_discharged_wh = 0; bool batt_discharged_valid = false;
-  int   batt_charged_wh    = 0; bool batt_charged_valid    = false;
-  float cell_v[4]    = {0, 0, 0, 0};                             // cell voltages (V)
-  bool  cell_valid[4]= {false, false, false, false};            // [0..1]=reg0x56, [2..3]=reg0x57
+  int   discharged_wh = 0; bool discharged_valid = false;
+  int   charged_wh    = 0; bool charged_valid    = false;
+  float cell_v[4]     = {0, 0, 0, 0};                  // cell voltages (V)
+  bool  cell_valid[4] = {false, false, false, false};  // [0..1]=reg0x56, [2..3]=reg0x57
+};
 
-  // Solar charger (NAD 0x81)
-  float solar_voltage = 0.0f; bool solar_valid   = false;        // shared valid for V+I
-  float solar_current = 0.0f;
+struct NBusSolar {
+  NBusIdentity id;
+
+  float voltage = 0.0f; bool valid = false;            // shared valid for V+I
+  float current = 0.0f;
   float starter_voltage = 0.0f; bool starter_valid = false;
+};
+
+// Decoded snapshot of the whole bus.
+struct NBusState {
+  NBusBattery batt[NBUS_MAX_BATTERIES];
+  NBusSolar   solar;
 };
 
 // --- Free decode helpers (exposed so unit tests can hit them directly) ---
@@ -47,7 +88,8 @@ inline uint16_t nbus_u16(uint8_t hi, uint8_t lo) {
 }
 
 // Decode a centi-unit value (×0.01) where bit 15 is a sign flag (1 ⇒ negative).
-// Used for battery/solar current.
+// Used for battery/solar current. NOT two's complement: reading it that way turns a
+// 0.06 A trickle into −325 A, which is how the encoding was found in the first place.
 inline float nbus_signed_centi(uint8_t hi, uint8_t lo) {
   uint16_t raw = nbus_u16(hi, lo);
   uint16_t mag = raw & 0x7FFF;
@@ -58,10 +100,18 @@ inline float nbus_signed_centi(uint8_t hi, uint8_t lo) {
 class NBusParser {
 public:
   // Feed the 8 LIN data bytes of a slave-response frame (the bytes after the sync,
-  // i.e. NAD PCI SID reg d0 d1 d2 d3). Returns true if a known register updated state.
-  bool feedResponse(const uint8_t* data, size_t len);
+  // i.e. NAD PCI SID reg d0 d1 d2 d3). `battSlot` selects which pack a NAD 0x85 frame
+  // belongs to and is ignored for other NADs; see NBusCycleTracker for how it is
+  // derived. Returns true if a known register updated state.
+  bool feedResponse(const uint8_t* data, size_t len, int battSlot = 0);
 
   const NBusState& state() const { return state_; }
+
+  // Discard everything known about the battery packs. Call this when the poll cycle
+  // changes shape (see NBusCycleTracker::topologyEpoch): the slots have been reshuffled,
+  // so every stored value belongs to a pack that is no longer in that slot. The solar
+  // charger is untouched — it is identified by its own NAD, never by position.
+  void forgetBatteries();
 
   // LIN "classic" checksum over the data bytes only (inverted sum with carry).
   // Diagnostic frames (ID 0x3C/0x3D) always use classic, never enhanced — the PID is
@@ -71,8 +121,83 @@ public:
 private:
   NBusState state_;
 
-  bool decodeBattery(uint8_t reg, const uint8_t* d);
+  bool decodeBattery(uint8_t reg, const uint8_t* d, int slot);
   bool decodeSolar(uint8_t reg, const uint8_t* d);
+  // Registers shared by every device type: serial, address, model, firmware.
+  bool decodeIdentity(NBusIdentity& id, uint8_t reg, const uint8_t* d, bool* reordered);
+};
+
+// Tells the two battery packs apart.
+//
+// Both answer on NAD 0x85, so the NAD is useless for this. What separates them is
+// position in the poll cycle: the master interrogates the devices in a fixed order,
+// and the solar charger's NAD 0x81 frame marks where one cycle ends and the next
+// begins. The n-th battery response after an 0x81 frame is always the same pack.
+//
+// An earlier attempt keyed on elapsed time instead ("within 90 ms of the 0x81 frame
+// ⇒ pack two"). It looked convincing and was wrong twice over: a battery firmware
+// update moved the slots and emptied one group entirely, and even after re-tuning,
+// roughly 9% of frames still landed on the wrong side of the threshold whenever a
+// pack answered late. Position has no such grey zone.
+//
+// The one failure mode left is a lost frame. If an 0x81 frame goes missing two cycles
+// merge and the tail of the run overflows past the expected count; if a battery frame
+// goes missing the run comes up short and every position after the gap is shifted onto
+// the wrong pack. Both are caught by the same rule: a run whose length does not match
+// the learned cycle length is discarded rather than attributed. Dropping a frame costs
+// one sample out of thousands. Misattributing one silently corrupts a register table,
+// and nothing downstream would ever flag it.
+class NBusCycleTracker {
+public:
+  static constexpr int  kMaxPerCycle = 6;   // battery responses buffered per cycle
+  static constexpr int  kMinCycles   = 8;   // observed cycles before the length is trusted
+  static constexpr int8_t kSolarSlot = -1;
+  // The length histogram is halved once it reaches this many observations, so recent
+  // cycles outweigh old ones. Without it the histogram remembers for ever: a pack added
+  // after a week of running would be outvoted by a week of two-pack cycles, and every
+  // cycle would be dropped from then on. That fails as silent staleness — sensors stop
+  // updating with nothing logged — which is the worst shape a bug can take here.
+  static constexpr uint32_t kDecayAt = 256;
+
+  struct Out {
+    uint8_t reg;
+    uint8_t d[4];
+    int8_t  slot;  // 0..NBUS_MAX_BATTERIES-1, or kSolarSlot
+  };
+
+  // Feed one checksum-valid slave response. Battery frames are buffered until their
+  // cycle closes, so this returns 0 for them; the 0x81 frame that closes a cycle
+  // returns the whole cycle at once, followed by the solar frame itself. Writes at
+  // most `outMax` entries and returns how many.
+  int feed(uint8_t nad, uint8_t reg, const uint8_t* d, Out* out, int outMax);
+
+  int      expectedPerCycle() const { return expected_; }
+  uint32_t cyclesAccepted() const { return accepted_; }
+  uint32_t cyclesDropped() const  { return dropped_; }
+
+  // Increments whenever the learned cycle length changes, i.e. whenever a device joins
+  // or leaves the bus. Slot N before the change and slot N after it are not the same
+  // pack — observed directly in the capture where the second pack came online: the pack
+  // answering first went from KAA2****53 to KAA2****95 at that moment.
+  //
+  // A slot's bus address (reg 0x60) also reveals the swap, but only when a 0x60 frame
+  // happens along, which is seconds later. Anything published in between would carry
+  // the wrong pack's name. Consumers should watch this counter and drop every slot the
+  // moment it moves.
+  uint32_t topologyEpoch() const { return epoch_; }
+
+private:
+  void noteLength(int len);
+
+  Out      pending_[kMaxPerCycle];
+  int      nPending_ = 0;
+  bool     overflow_ = false;      // more battery frames this cycle than we can hold
+  bool     started_  = false;      // ignore the partial run we join mid-cycle
+  uint16_t lenHist_[kMaxPerCycle + 1] = {0};
+  uint32_t lenTotal_ = 0;
+  int      expected_ = 0;
+  uint32_t accepted_ = 0, dropped_ = 0;
+  uint32_t epoch_ = 0;
 };
 
 #endif  // NBUS_PARSER_H

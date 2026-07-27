@@ -38,6 +38,9 @@ struct RawEntry {
 
 HardwareSerial   LinSerial(NBUS_UART_NUM);
 NBusParser       parser;
+// Decides which pack a NAD 0x85 frame belongs to. See NBusParser.h for why this is done
+// by position in the poll cycle rather than by timing.
+NBusCycleTracker cycles;
 Preferences      prefs;
 WiFiClient       wifiClient;
 PubSubClient     mqtt(wifiClient);
@@ -69,10 +72,12 @@ bool g_portalActive     = false;
 bool g_netServicesUp    = false;
 
 // Per-group last-seen timestamps for staleness.
-uint32_t g_lastBattMs    = 0;
+// Freshness is per pack, not per NAD: both packs answer on 0x85, so a single timestamp
+// would let a live pack vouch for a silent one.
+uint32_t g_lastBattMs[NBUS_MAX_BATTERIES] = {0};
+uint32_t g_lastCellMs[NBUS_MAX_BATTERIES] = {0};
 uint32_t g_lastSolarMs   = 0;
 uint32_t g_lastStarterMs = 0;
-uint32_t g_lastCellMs    = 0;
 
 uint32_t g_lastPublishMs   = 0;
 uint32_t g_lastMqttTryMs   = 0;
@@ -466,21 +471,41 @@ void handleProvisioning() {
 // MQTT + Home Assistant discovery
 // --------------------------------------------------------------------------
 String statusTopic()  { return cfg.base + "/status"; }
-String batteryTopic() { return cfg.base + "/battery"; }
+// One topic per poll slot. The slot is only a transport address: which pack sits in it
+// can change (the battery firmware update swapped the order). What identifies a pack to
+// Home Assistant is its serial number, further down.
+String batteryTopic(int slot) { return cfg.base + "/battery/" + String(slot + 1); }
 String solarTopic()   { return cfg.base + "/solar"; }
 String starterTopic() { return cfg.base + "/starter"; }
 
-void addDevice(JsonObject dev) {
+// Every device on the bus is published as its own Home Assistant device, linked back to
+// the ESP as the bridge that reports it. Grouping all three under one device is what made
+// the dashboard mix the two packs together in the first place.
+//
+// `suffix` empty ⇒ the bridge itself.
+void addDevice(JsonObject dev, const String& suffix, const String& name,
+               const char* model, const String& sw) {
   JsonArray ids = dev["ids"].to<JsonArray>();
-  ids.add(NBUS_DEVICE_ID);
-  dev["name"] = NBUS_DEVICE_NAME;
+  ids.add(suffix.isEmpty() ? String(NBUS_DEVICE_ID) : String(NBUS_DEVICE_ID) + "_" + suffix);
+  dev["name"] = name;
   dev["mf"]   = NBUS_DEVICE_MF;
-  dev["mdl"]  = NBUS_DEVICE_MDL;
+  dev["mdl"]  = model;
+  if (!sw.isEmpty()) dev["sw"] = sw;
+  if (!suffix.isEmpty()) dev["via_device"] = NBUS_DEVICE_ID;
 }
 
+void addBridgeDevice(JsonObject dev) {
+  addDevice(dev, "", NBUS_DEVICE_NAME, NBUS_DEVICE_MDL, NBUS_FW_VERSION);
+}
+
+// `devSuffix` empty ⇒ attach the entity to the bridge device.
 void publishDiscoverySensor(const char* key, const char* name, const char* stateTopic,
                             const char* valTpl, const char* unit, const char* devCla,
-                            const char* stateCla = "measurement") {
+                            const char* stateCla = "measurement",
+                            const String& devSuffix = String(),
+                            const String& devName = String(),
+                            const char* devModel = NBUS_DEVICE_MDL,
+                            const String& devSw = String()) {
   JsonDocument doc;
   doc["name"]         = name;
   doc["uniq_id"]      = String(NBUS_DEVICE_ID) + "_" + key;
@@ -490,7 +515,9 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   if (devCla && devCla[0]) doc["dev_cla"]    = devCla;
   if (stateCla && stateCla[0]) doc["stat_cla"] = stateCla;
   doc["avty_t"]       = statusTopic();
-  addDevice(doc["dev"].to<JsonObject>());
+  JsonObject dev = doc["dev"].to<JsonObject>();
+  if (devSuffix.isEmpty()) addBridgeDevice(dev);
+  else                     addDevice(dev, devSuffix, devName, devModel, devSw);
 
   String topic = String(NBUS_HA_PREFIX) + "/sensor/" + NBUS_DEVICE_ID + "_" + key + "/config";
   String payload;
@@ -520,70 +547,177 @@ struct RegSensor {
 };
 
 const RegSensor kRegSensors[] = {
-  // Two 16-bit fields, both 270 in every capture so far. The hypothesis is two temperature
-  // sensors at 27.0 °C; a sustained load should make a FET or shunt sensor climb away from
-  // a cell sensor, which is what splits them. Read unsigned — a reading near 6500 in a
-  // frost would mean the encoding is two's complement.
-  { "reg_85_90_a", 0x85, 0x90, "Battery 0x90 field A", "{{ value[0:4] | int(base=16) / 10 }}", "°C", "measurement" },
-  { "reg_85_90_b", 0x85, 0x90, "Battery 0x90 field B", "{{ value[4:8] | int(base=16) / 10 }}", "°C", "measurement" },
+  // Was a steady 270 on pack firmware 4.x, which made "two temperature sensors at 27.0 °C"
+  // look plausible. Firmware 5.1 reports 0 in both halves, so that reading is dead: a
+  // temperature does not become exactly zero across an update while the pack sits at the
+  // same bench temperature. Published raw now — the °C it used to claim was a guess that
+  // the update disproved, and a wrong unit is worse than none.
+  { "reg_85_90", 0x85, 0x90, "0x90 raw", "", "", "" },
 
   // Alarm-bitmap candidates: all zero on a healthy bus, which is indistinguishable from
   // "unused" until one of them flips.
-  { "reg_85_c0", 0x85, 0xC0, "Battery 0xC0 raw", "", "", "" },
-  { "reg_85_f1", 0x85, 0xF1, "Battery 0xF1 raw", "", "", "" },
-  { "reg_85_f2", 0x85, 0xF2, "Battery 0xF2 raw", "", "", "" },
-  { "reg_81_c0", 0x81, 0xC0, "Solar 0xC0 raw",   "", "", "" },
-  { "reg_81_f0", 0x81, 0xF0, "Solar 0xF0 raw",   "", "", "" },
-  { "reg_81_f1", 0x81, 0xF1, "Solar 0xF1 raw",   "", "", "" },
+  { "reg_85_c0", 0x85, 0xC0, "0xC0 raw", "", "", "" },
+  { "reg_85_f1", 0x85, 0xF1, "0xF1 raw", "", "", "" },
+  { "reg_85_f2", 0x85, 0xF2, "0xF2 raw", "", "", "" },
+  { "reg_81_c0", 0x81, 0xC0, "0xC0 raw", "", "", "" },
+  { "reg_81_f0", 0x81, 0xF0, "0xF0 raw", "", "", "" },
+  { "reg_81_f1", 0x81, 0xF1, "0xF1 raw", "", "", "" },
 
   // Recorded as a constant 730 for as long as captures were 5.5 minutes long; the first
-  // day of real history put it at 740. Candidate cycle count.
-  { "reg_85_0c", 0x85, 0x0C, "Battery 0x0C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+  // day of real history put it at 740. Candidate cycle count. Both packs report the same
+  // value, so whatever it counts is not a per-pack measurement — worth watching to see
+  // whether they ever diverge.
+  { "reg_85_0c", 0x85, 0x0C, "0x0C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+
+  // New with pack firmware 5.1; absent on 4.x. Four bytes that read 76/75/76/10 on one
+  // pack and 75/75/75/10 on the other — per-pack, roughly equal in the first three, which
+  // is the shape three sensors of the same quantity would have. Deliberately unitless:
+  // that shape is a hint, not a decode, and the whole point of the mirror is to record
+  // candidates without naming them.
+  { "reg_85_14_a", 0x85, 0x14, "0x14 byte 0", "{{ value[0:2] | int(base=16) }}", "", "measurement" },
+  { "reg_85_14_b", 0x85, 0x14, "0x14 byte 1", "{{ value[2:4] | int(base=16) }}", "", "measurement" },
+  { "reg_85_14_c", 0x85, 0x14, "0x14 byte 2", "{{ value[4:6] | int(base=16) }}", "", "measurement" },
+  { "reg_85_14_d", 0x85, 0x14, "0x14 byte 3", "{{ value[6:8] | int(base=16) }}", "", "measurement" },
 
   // Both move, neither follows anything instantaneous; 0x11 lags the output badly.
-  { "reg_81_11", 0x81, 0x11, "Solar 0x11 value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
-  { "reg_81_1c", 0x81, 0x1C, "Solar 0x1C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+  { "reg_81_11", 0x81, 0x11, "0x11 value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+  { "reg_81_1c", 0x81, 0x1C, "0x1C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
 };
 
-void publishRegDiscovery() {
+// Register-mirror topics name the device, not the NAD. Both packs answer on 0x85, so a
+// NAD-keyed topic would have them overwrite each other — silently, and with plausible
+// values, which is the worst possible way to be wrong.
+String regTopic(int slot, uint8_t reg) {
+  char buf[32];
+  if (slot == NBusCycleTracker::kSolarSlot) snprintf(buf, sizeof buf, "/reg/81/%02X", reg);
+  else snprintf(buf, sizeof buf, "/reg/85_%d/%02X", slot + 1, reg);
+  return cfg.base + buf;
+}
+
+void publishRegDiscovery(int slot, const String& devSuffix, const String& devName,
+                         const char* devModel, const String& devSw) {
+  const uint8_t nad = (slot == NBusCycleTracker::kSolarSlot) ? NBUS_NAD_SOLAR
+                                                             : NBUS_NAD_BATTERY;
   for (const auto& r : kRegSensors) {
-    char topic[64];
-    snprintf(topic, sizeof(topic), "%s/reg/%02X/%02X", cfg.base.c_str(), r.nad, r.reg);
-    publishDiscoverySensor(r.key, r.name, topic, r.valTpl, r.unit, "", r.stateCla);
+    if (r.nad != nad) continue;
+    // The entity key carries the serial so the entity follows its pack, not its slot.
+    const String key = devSuffix + "_" + r.key;
+    publishDiscoverySensor(key.c_str(), r.name, regTopic(slot, r.reg).c_str(),
+                           r.valTpl, r.unit, "", r.stateCla,
+                           devSuffix, devName, devModel, devSw);
   }
 }
 
-void publishDiscovery() {
-  const String bt = batteryTopic();
+// Discovery for one battery pack. Keyed on the pack's serial number, never on its slot
+// or bus address: the firmware update moved both of those (slot order swapped, address
+// went 3 -> 11) while the serial stayed put. An entity keyed on either would have
+// silently started reporting the other pack.
+void publishBatteryDiscovery(int slot) {
+  const NBusBattery& b = parser.state().batt[slot];
+  const String sfx  = String("b") + b.id.serial;              // e.g. bKAA2****53
+  const String name = String("Leisure battery ") + b.id.serial;
+  const String sw   = b.id.fw_valid
+                    ? String(b.id.fw_major) + "." + String(b.id.fw_minor) : String();
+  const String bt   = batteryTopic(slot);
+
+  struct { const char* key; const char* name; const char* tpl; const char* unit;
+           const char* cla; const char* sta; } kFields[] = {
+    { "soc",        "SoC",               "{{ value_json.soc }}",      "%",  "battery",        "measurement" },
+    { "voltage",    "Voltage",           "{{ value_json.voltage }}",  "V",  "voltage",        "measurement" },
+    { "current",    "Current",           "{{ value_json.current }}",  "A",  "current",        "measurement" },
+    { "power",      "Power",             "{{ value_json.power }}",    "W",  "power",          "measurement" },
+    { "cell1",      "Cell 1 voltage",    "{{ value_json.cells[0] }}", "V",  "voltage",        "measurement" },
+    { "cell2",      "Cell 2 voltage",    "{{ value_json.cells[1] }}", "V",  "voltage",        "measurement" },
+    { "cell3",      "Cell 3 voltage",    "{{ value_json.cells[2] }}", "V",  "voltage",        "measurement" },
+    { "cell4",      "Cell 4 voltage",    "{{ value_json.cells[3] }}", "V",  "voltage",        "measurement" },
+    { "energy",     "Energy remaining",  "{{ value_json.energy }}",   "Wh", "energy_storage", "measurement" },
+    { "quality",    "Quality",           "{{ value_json.quality }}",  "%",  "",               "measurement" },
+    { "capacity",   "Capacity",          "{{ value_json.capacity }}", "Ah", "",               "measurement" },
+    // The pack reports its own runtime estimate in register 0x34; nothing is derived
+    // here. Only the half matching the current direction of travel is ever published.
+    { "to_empty",   "Time to empty",     "{{ value_json.to_empty }}", "min", "duration",      "measurement" },
+    { "to_full",    "Time to full",      "{{ value_json.to_full }}",  "min", "duration",      "measurement" },
+    // Lifetime counters, so total_increasing rather than measurement: HA must not read a
+    // counter reset as a huge negative reading. The update reset both of these to ~0.
+    { "discharged", "Energy discharged", "{{ value_json.discharged }}", "Wh", "energy", "total_increasing" },
+    { "charged",    "Energy charged",    "{{ value_json.charged }}",    "Wh", "energy", "total_increasing" },
+    // Bus address, so a reshuffle is visible in the history rather than inferred from it.
+    { "address",    "Bus address",       "{{ value_json.address }}",    "",   "",       "" },
+  };
+  for (const auto& f : kFields) {
+    const String key = sfx + "_" + f.key;
+    publishDiscoverySensor(key.c_str(), f.name, bt.c_str(), f.tpl, f.unit, f.cla, f.sta,
+                           sfx, name, "NDS Tempra", sw);
+  }
+  publishRegDiscovery(slot, sfx, name, "NDS Tempra", sw);
+}
+
+void publishSolarDiscovery() {
+  const NBusSolar& s = parser.state().solar;
+  const String sfx  = String("s") + s.id.serial;
+  const String name = String("Solar charger ") + s.id.serial;
+  const String sw   = s.id.fw_valid
+                    ? String(s.id.fw_major) + "." + String(s.id.fw_minor) : String();
   const String st = solarTopic();
   const String rt = starterTopic();
 
-  publishDiscoverySensor("battery_soc",     "Leisure battery SoC",     bt.c_str(), "{{ value_json.soc }}",     "%", "battery");
-  publishDiscoverySensor("battery_voltage", "Leisure battery voltage", bt.c_str(), "{{ value_json.voltage }}", "V", "voltage");
-  publishDiscoverySensor("battery_current", "Leisure battery current", bt.c_str(), "{{ value_json.current }}", "A", "current");
-  publishDiscoverySensor("battery_power",   "Leisure battery power",   bt.c_str(), "{{ value_json.power }}",   "W", "power");
-  publishDiscoverySensor("cell1_voltage",   "Battery cell 1 voltage",  bt.c_str(), "{{ value_json.cells[0] }}", "V", "voltage");
-  publishDiscoverySensor("cell2_voltage",   "Battery cell 2 voltage",  bt.c_str(), "{{ value_json.cells[1] }}", "V", "voltage");
-  publishDiscoverySensor("cell3_voltage",   "Battery cell 3 voltage",  bt.c_str(), "{{ value_json.cells[2] }}", "V", "voltage");
-  publishDiscoverySensor("cell4_voltage",   "Battery cell 4 voltage",  bt.c_str(), "{{ value_json.cells[3] }}", "V", "voltage");
-  publishDiscoverySensor("battery_energy",   "Leisure battery energy remaining", bt.c_str(), "{{ value_json.energy }}",   "Wh", "energy_storage");
-  publishDiscoverySensor("battery_quality",  "Leisure battery quality",          bt.c_str(), "{{ value_json.quality }}",  "%",  "");
-  publishDiscoverySensor("battery_capacity", "Leisure battery capacity",         bt.c_str(), "{{ value_json.capacity }}", "Ah", "");
-  // The battery reports its own runtime estimate in register 0x34; it is not derived
-  // here. Only the half matching the current direction of travel is ever published.
-  publishDiscoverySensor("battery_to_empty", "Leisure battery time to empty", bt.c_str(), "{{ value_json.to_empty }}", "min", "duration");
-  publishDiscoverySensor("battery_to_full",  "Leisure battery time to full",  bt.c_str(), "{{ value_json.to_full }}",  "min", "duration");
-  // Lifetime counters, so total_increasing rather than measurement: HA must not treat a
-  // counter reset as a huge negative reading.
-  publishDiscoverySensor("battery_discharged", "Leisure battery energy discharged", bt.c_str(),
-                         "{{ value_json.discharged }}", "Wh", "energy", "total_increasing");
-  publishDiscoverySensor("battery_charged",    "Leisure battery energy charged",    bt.c_str(),
-                         "{{ value_json.charged }}",    "Wh", "energy", "total_increasing");
-  publishDiscoverySensor("solar_voltage",   "Solar charger voltage",   st.c_str(), "{{ value_json.voltage }}", "V", "voltage");
-  publishDiscoverySensor("solar_current",   "Solar charge current",    st.c_str(), "{{ value_json.current }}", "A", "current");
-  publishDiscoverySensor("starter_voltage", "Starter battery voltage", rt.c_str(), "{{ value_json.voltage }}", "V", "voltage");
-  publishRegDiscovery();
-  Serial.println(F("[mqtt] discovery published"));
+  publishDiscoverySensor((sfx + "_voltage").c_str(), "Voltage", st.c_str(),
+                         "{{ value_json.voltage }}", "V", "voltage", "measurement",
+                         sfx, name, "NDS MPPT", sw);
+  publishDiscoverySensor((sfx + "_current").c_str(), "Charge current", st.c_str(),
+                         "{{ value_json.current }}", "A", "current", "measurement",
+                         sfx, name, "NDS MPPT", sw);
+  // The starter battery has no node of its own; the charger is what measures it.
+  publishDiscoverySensor((sfx + "_starter").c_str(), "Starter battery voltage", rt.c_str(),
+                         "{{ value_json.voltage }}", "V", "voltage", "measurement",
+                         sfx, name, "NDS MPPT", sw);
+  publishDiscoverySensor((sfx + "_address").c_str(), "Bus address", st.c_str(),
+                         "{{ value_json.address }}", "", "", "",
+                         sfx, name, "NDS MPPT", sw);
+  publishRegDiscovery(NBusCycleTracker::kSolarSlot, sfx, name, "NDS MPPT", sw);
+}
+
+// Bridge-level diagnostics. These describe the reader, not the bus, so they hang off the
+// ESP's own device and are published as soon as MQTT is up.
+void publishBridgeDiscovery() {
+  const String ct = cfg.base + "/cycle";
+  publishDiscoverySensor("cycle_expected", "Poll cycle length", ct.c_str(),
+                         "{{ value_json.expected }}", "", "", "measurement");
+  // If this climbs steadily, frames are being lost and readings are being thrown away
+  // rather than misattributed — the trade this design deliberately makes.
+  publishDiscoverySensor("cycle_dropped", "Poll cycles dropped", ct.c_str(),
+                         "{{ value_json.dropped }}", "", "", "total_increasing");
+  publishDiscoverySensor("cycle_accepted", "Poll cycles accepted", ct.c_str(),
+                         "{{ value_json.accepted }}", "", "", "total_increasing");
+}
+
+// Discovery is (re)published whenever the set of identified devices changes — on connect,
+// and again when a pack's serial first arrives or a reshuffle points a slot at a different
+// pack. Every message is retained and idempotent, so republishing costs nothing.
+String g_discoSignature;
+
+String identitySignature() {
+  String s;
+  for (int i = 0; i < NBUS_MAX_BATTERIES; ++i) {
+    s += parser.state().batt[i].id.serial;
+    s += '|';
+  }
+  s += parser.state().solar.id.serial;
+  return s;
+}
+
+void publishDiscovery() {
+  publishBridgeDiscovery();
+  // A pack is published only once its serial is known. Naming it after its slot in the
+  // meantime would create an entity that a later reshuffle silently repoints at the other
+  // pack — exactly the failure this whole change exists to remove. The serial arrives
+  // within seconds of boot; until then the pack is simply absent, which is honest.
+  for (int i = 0; i < NBUS_MAX_BATTERIES; ++i) {
+    if (parser.state().batt[i].id.serialValid()) publishBatteryDiscovery(i);
+  }
+  if (parser.state().solar.id.serialValid()) publishSolarDiscovery();
+  g_discoSignature = identitySignature();
+  Serial.printf("[mqtt] discovery published (%s)\n", g_discoSignature.c_str());
 }
 
 bool mqttConnect() {
@@ -616,51 +750,73 @@ void publishState() {
   const NBusState& s = parser.state();
   const uint32_t now = millis();
 
-  // Battery
-  if (s.batt_voltage_valid && (now - g_lastBattMs) < NBUS_STALE_MS) {
+  // One message per pack. Publishing a pack whose serial is unknown would feed a topic
+  // that no entity is subscribed to, so skip it.
+  for (int i = 0; i < NBUS_MAX_BATTERIES; ++i) {
+    const NBusBattery& b = s.batt[i];
+    if (!b.id.serialValid()) continue;
+    if (!b.voltage_valid || (now - g_lastBattMs[i]) >= NBUS_STALE_MS) continue;
+
     JsonDocument doc;
-    if (s.batt_soc_valid)     doc["soc"]     = s.batt_soc;
-    if (s.batt_voltage_valid) doc["voltage"] = roundf(s.batt_voltage * 100) / 100.0;
-    if (s.batt_wh_valid)       doc["energy"]   = s.batt_wh;
-    if (s.batt_quality_valid)  doc["quality"]  = s.batt_quality;
-    if (s.batt_capacity_valid) doc["capacity"] = s.batt_capacity_ah;
+    doc["serial"] = b.id.serial;
+    if (b.id.address_valid) doc["address"] = b.id.address;
+    if (b.soc_valid)      doc["soc"]      = b.soc;
+    doc["voltage"] = roundf(b.voltage * 100) / 100.0;
+    if (b.wh_valid)       doc["energy"]   = b.wh;
+    if (b.quality_valid)  doc["quality"]  = b.quality;
+    if (b.capacity_valid) doc["capacity"] = b.capacity_ah;
     // These two alternate: 0x34 sends FFFF for whichever direction does not apply, so one
     // of them is invalid at all times. Omitting the key would leave the template rendering
     // an empty string, which Home Assistant treats as "no update" — the entity would then
     // hold the last figure from the opposite direction indefinitely. An explicit null
     // renders as "None", which does set the state to unknown.
-    if (s.batt_to_empty_valid) doc["to_empty"] = s.batt_to_empty_min; else doc["to_empty"] = nullptr;
-    if (s.batt_to_full_valid)  doc["to_full"]  = s.batt_to_full_min;  else doc["to_full"]  = nullptr;
-    if (s.batt_discharged_valid) doc["discharged"] = s.batt_discharged_wh;
-    if (s.batt_charged_valid)    doc["charged"]    = s.batt_charged_wh;
-    if (s.batt_current_valid) {
-      doc["current"] = roundf(s.batt_current * 100) / 100.0;
-      doc["power"]   = roundf(s.batt_voltage * s.batt_current * 10) / 10.0;
+    if (b.to_empty_valid) doc["to_empty"] = b.to_empty_min; else doc["to_empty"] = nullptr;
+    if (b.to_full_valid)  doc["to_full"]  = b.to_full_min;  else doc["to_full"]  = nullptr;
+    if (b.discharged_valid) doc["discharged"] = b.discharged_wh;
+    if (b.charged_valid)    doc["charged"]    = b.charged_wh;
+    if (b.current_valid) {
+      doc["current"] = roundf(b.current * 100) / 100.0;
+      doc["power"]   = roundf(b.voltage * b.current * 10) / 10.0;
     }
-    bool anyCell = s.cell_valid[0] || s.cell_valid[1] || s.cell_valid[2] || s.cell_valid[3];
-    if (anyCell && (now - g_lastCellMs) < NBUS_STALE_MS) {
+    const bool anyCell = b.cell_valid[0] || b.cell_valid[1] ||
+                         b.cell_valid[2] || b.cell_valid[3];
+    if (anyCell && (now - g_lastCellMs[i]) < NBUS_STALE_MS) {
       JsonArray cells = doc["cells"].to<JsonArray>();
-      for (int i = 0; i < 4; ++i) cells.add(roundf(s.cell_v[i] * 1000) / 1000.0);
+      for (int c = 0; c < 4; ++c) cells.add(roundf(b.cell_v[c] * 1000) / 1000.0);
     }
     String payload; serializeJson(doc, payload);
-    mqtt.publish(batteryTopic().c_str(), payload.c_str(), true);
+    mqtt.publish(batteryTopic(i).c_str(), payload.c_str(), true);
   }
 
   // Solar charger
-  if (s.solar_valid && (now - g_lastSolarMs) < NBUS_STALE_MS) {
+  if (s.solar.valid && (now - g_lastSolarMs) < NBUS_STALE_MS) {
     JsonDocument doc;
-    doc["voltage"] = roundf(s.solar_voltage * 100) / 100.0;
-    doc["current"] = roundf(s.solar_current * 100) / 100.0;
+    doc["voltage"] = roundf(s.solar.voltage * 100) / 100.0;
+    doc["current"] = roundf(s.solar.current * 100) / 100.0;
+    if (s.solar.id.address_valid) doc["address"] = s.solar.id.address;
+    if (s.solar.id.serialValid()) doc["serial"] = s.solar.id.serial;
     String payload; serializeJson(doc, payload);
     mqtt.publish(solarTopic().c_str(), payload.c_str(), true);
   }
 
   // Starter battery
-  if (s.starter_valid && (now - g_lastStarterMs) < NBUS_STALE_MS) {
+  if (s.solar.starter_valid && (now - g_lastStarterMs) < NBUS_STALE_MS) {
     JsonDocument doc;
-    doc["voltage"] = roundf(s.starter_voltage * 100) / 100.0;
+    doc["voltage"] = roundf(s.solar.starter_voltage * 100) / 100.0;
     String payload; serializeJson(doc, payload);
     mqtt.publish(starterTopic().c_str(), payload.c_str(), true);
+  }
+
+  // How the frame split is holding up. This is the health of the attribution itself, so
+  // it belongs in the recorder alongside the readings it vouches for.
+  {
+    JsonDocument doc;
+    doc["expected"] = cycles.expectedPerCycle();
+    doc["accepted"] = cycles.cyclesAccepted();
+    doc["dropped"]  = cycles.cyclesDropped();
+    doc["epoch"]    = cycles.topologyEpoch();
+    String payload; serializeJson(doc, payload);
+    mqtt.publish((cfg.base + "/cycle").c_str(), payload.c_str(), true);
   }
 }
 
@@ -679,19 +835,21 @@ void publishState() {
 // naming an entity would claim a meaning we have not established.
 // --------------------------------------------------------------------------
 struct RegMirror {
-  uint8_t  nad = 0, reg = 0;
+  int8_t   busSlot = 0;            // poll slot, or NBusCycleTracker::kSolarSlot
+  uint8_t  reg = 0;
   uint8_t  data[4] = {0, 0, 0, 0};
   uint32_t lastPubMs = 0;
   bool     used = false;
 };
 RegMirror g_regMirror[NBUS_REG_MIRROR_SLOTS];
 
-void mirrorRegister(uint8_t nad, uint8_t reg, const uint8_t* d) {
+// Keyed on the poll slot rather than the NAD, because the two packs share one NAD.
+void mirrorRegister(int busSlot, uint8_t reg, const uint8_t* d) {
   if (!mqtt.connected()) return;
 
   RegMirror* slot = nullptr;
   for (auto& m : g_regMirror) {
-    if (m.used && m.nad == nad && m.reg == reg) { slot = &m; break; }
+    if (m.used && m.busSlot == busSlot && m.reg == reg) { slot = &m; break; }
     if (!m.used && slot == nullptr) slot = &m;  // remember the first free slot
   }
   if (slot == nullptr) return;  // table full; a fixed table cannot be flooded by noise
@@ -706,17 +864,24 @@ void mirrorRegister(uint8_t nad, uint8_t reg, const uint8_t* d) {
   if (!changed) return;
   if (!isNew && (now - slot->lastPubMs) < NBUS_REG_MIRROR_MS) return;
 
-  slot->used = true;
-  slot->nad  = nad;
-  slot->reg  = reg;
+  slot->used    = true;
+  slot->busSlot = static_cast<int8_t>(busSlot);
+  slot->reg     = reg;
   memcpy(slot->data, d, 4);
   slot->lastPubMs = now;
 
-  char topic[64];
-  snprintf(topic, sizeof(topic), "%s/reg/%02X/%02X", cfg.base.c_str(), nad, reg);
   char payload[9];
   snprintf(payload, sizeof(payload), "%02X%02X%02X%02X", d[0], d[1], d[2], d[3]);
-  mqtt.publish(topic, payload, true);
+  mqtt.publish(regTopic(busSlot, reg).c_str(), payload, true);
+}
+
+// A reshuffle makes every mirrored battery register describe the wrong pack. Forget them
+// so the next frame republishes under the correct topic instead of being suppressed as
+// "unchanged" by the throttle above.
+void forgetBatteryMirror() {
+  for (auto& m : g_regMirror) {
+    if (m.used && m.busSlot != NBusCycleTracker::kSolarSlot) m = RegMirror();
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -864,6 +1029,20 @@ void handleStatus() {
   doc["ring_size"] = (uint32_t)NBUS_RAW_RING_ENTRIES;
   doc["bus_silent"] = g_busSilent;
   doc["last_frame_age_ms"] = g_lastFrameMs ? (millis() - g_lastFrameMs) : 0;
+  // How the two packs are being told apart, and how well. A dropped count that keeps pace
+  // with the accepted count means frames are being lost somewhere; readings are still
+  // correct, there are just fewer of them.
+  doc["cycle_expected"] = cycles.expectedPerCycle();
+  doc["cycle_accepted"] = cycles.cyclesAccepted();
+  doc["cycle_dropped"]  = cycles.cyclesDropped();
+  doc["cycle_epoch"]    = cycles.topologyEpoch();
+  // Only the count of identified packs, not which ones. Serial numbers would make this
+  // endpoint worth reading, and it is deliberately the one thing served without auth.
+  int named = 0;
+  for (int i = 0; i < NBUS_MAX_BATTERIES; ++i) {
+    if (parser.state().batt[i].id.serialValid()) ++named;
+  }
+  doc["batteries_identified"] = named;
   doc["fs_used"]   = g_fsReady ? LittleFS.usedBytes() : 0;
   doc["fs_total"]  = g_fsReady ? LittleFS.totalBytes() : 0;
   doc["dump_seq"]  = g_dumpSeq;
@@ -1002,14 +1181,30 @@ void handleRawClear() {
 // --------------------------------------------------------------------------
 // LIN frame capture (read-only)
 // --------------------------------------------------------------------------
-void markFresh(uint8_t nad, uint8_t reg) {
+void markFresh(int busSlot, uint8_t reg) {
   const uint32_t now = millis();
-  if (nad == NBUS_NAD_BATTERY) {
-    g_lastBattMs = now;
-    if (reg == 0x56 || reg == 0x57) g_lastCellMs = now;
-  } else if (nad == NBUS_NAD_SOLAR) {
+  if (busSlot == NBusCycleTracker::kSolarSlot) {
     if (reg == 0x01) g_lastStarterMs = now;
     else             g_lastSolarMs = now;
+  } else if (busSlot >= 0 && busSlot < NBUS_MAX_BATTERIES) {
+    g_lastBattMs[busSlot] = now;
+    if (reg == 0x56 || reg == 0x57) g_lastCellMs[busSlot] = now;
+  }
+}
+
+// Hand one attributed frame to the parser and the mirror.
+void dispatchFrame(const NBusCycleTracker::Out& o) {
+  const bool isSolar = (o.slot == NBusCycleTracker::kSolarSlot);
+  const uint8_t nad  = isSolar ? NBUS_NAD_SOLAR : NBUS_NAD_BATTERY;
+  const uint8_t frame[8] = { nad, 0x06, 0xF4, o.reg,
+                             o.d[0], o.d[1], o.d[2], o.d[3] };
+
+  if (parser.feedResponse(frame, sizeof frame, isSolar ? 0 : o.slot)) {
+    markFresh(o.slot, o.reg);
+  } else {
+    // A well-formed response the parser has no meaning for. Checksum and framing already
+    // hold at this point, so it is real bus content, not noise — mirror it.
+    mirrorRegister(o.slot, o.reg, o.d);
   }
 }
 
@@ -1047,16 +1242,31 @@ void processFrameWindow(const uint8_t* buf, size_t len) {
     ringPush(d);
     g_lastFrameMs = millis();
 
-    if (parser.feedResponse(d, 8)) {
-      markFresh(d[0], d[3]);
 #ifdef NBUS_DEBUG
-      Serial.printf("[lin] NAD %02X reg %02X : %02X %02X %02X %02X\n",
-                    d[0], d[3], d[4], d[5], d[6], d[7]);
+    Serial.printf("[lin] NAD %02X reg %02X : %02X %02X %02X %02X\n",
+                  d[0], d[3], d[4], d[5], d[6], d[7]);
 #endif
-    } else if (d[1] == 0x06 && d[2] == 0xF4) {
-      // A well-formed response the parser has no meaning for. Checksum and framing
-      // already hold at this point, so it is real bus content, not noise — mirror it.
-      mirrorRegister(d[0], d[3], &d[4]);
+
+    // Nothing is decoded straight from the wire any more. Both packs answer on NAD 0x85,
+    // so a frame only acquires an owner once its whole poll cycle has closed and the
+    // cycle's length confirms nothing was lost. The tracker therefore returns frames in
+    // bursts, one cycle at a time, and returns none at all for a cycle it cannot vouch for.
+    if (d[1] == 0x06 && d[2] == 0xF4) {
+      NBusCycleTracker::Out out[NBusCycleTracker::kMaxPerCycle + 1];
+      const uint32_t epochBefore = cycles.topologyEpoch();
+      const int n = cycles.feed(d[0], d[3], &d[4], out, sizeof out / sizeof out[0]);
+
+      // A device joined or left the bus: the slots have been renumbered, so everything
+      // held against them describes the wrong pack. Drop it all and let discovery
+      // re-publish once the new occupants have named themselves.
+      if (cycles.topologyEpoch() != epochBefore) {
+        parser.forgetBatteries();
+        forgetBatteryMirror();
+        for (int i = 0; i < NBUS_MAX_BATTERIES; ++i) g_lastBattMs[i] = g_lastCellMs[i] = 0;
+        Serial.printf("[bus] poll cycle changed to %d battery frames; slots cleared\n",
+                      cycles.expectedPerCycle());
+      }
+      for (int i = 0; i < n; ++i) dispatchFrame(out[i]);
     }
     return;  // one response per window
   }
@@ -1161,7 +1371,10 @@ void loop() {
 
   // Discovery once per connection, then throttled state publishing.
   if (mqtt.connected()) {
-    if (!g_discoverySent) {
+    // Republished when a device first names itself and whenever a reshuffle points a slot
+    // at a different pack, not only on connect: at connect time no serial is known yet,
+    // so that alone would leave Home Assistant with the bridge and nothing else.
+    if (!g_discoverySent || identitySignature() != g_discoSignature) {
       publishDiscovery();
       g_discoverySent = true;
     }

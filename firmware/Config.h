@@ -13,7 +13,7 @@
 // one that succeeded. Bump NBUS_FW_VERSION whenever flashing something you may
 // later need to distinguish.
 // ---------------------------------------------------------------------------
-#define NBUS_FW_VERSION  "0.4.5"
+#define NBUS_FW_VERSION  "0.5.0"
 #define NBUS_FW_BUILD    __DATE__ " " __TIME__
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,10 @@
 // a trace even in registers whose meaning is still unknown. Several candidate alarm
 // registers read all-zero on a healthy bus, which is indistinguishable from "unused"
 // until the day one of them flips — and that day is the whole point of this device.
-#define NBUS_REG_MIRROR_SLOTS  48      // distinct (NAD, reg) pairs tracked; 27 seen so far
+// Keyed on (device, reg), where the two battery packs count as separate devices — they
+// share NAD 0x85, so keying on the NAD alone would have them overwrite each other's
+// registers. Two packs of ~24 registers plus ~18 for the charger is ~66 in the captures.
+#define NBUS_REG_MIRROR_SLOTS  96      // distinct (device, reg) pairs tracked
 #define NBUS_REG_MIRROR_MS     10000   // per-register floor between republishes
 
 // Reconnect backoff and heartbeat.
