@@ -140,16 +140,37 @@ private:
 // roughly 9% of frames still landed on the wrong side of the threshold whenever a
 // pack answered late. Position has no such grey zone.
 //
-// The one failure mode left is a lost frame. If an 0x81 frame goes missing two cycles
-// merge and the tail of the run overflows past the expected count; if a battery frame
-// goes missing the run comes up short and every position after the gap is shifted onto
-// the wrong pack. Both are caught by the same rule: a run whose length does not match
-// the learned cycle length is discarded rather than attributed. Dropping a frame costs
-// one sample out of thousands. Misattributing one silently corrupts a register table,
-// and nothing downstream would ever flag it.
+// The one failure mode left is a lost frame. If a battery frame goes missing the run
+// comes up short and every position after the gap is shifted onto the wrong pack, so a
+// run whose length is not a whole number of cycles is discarded rather than attributed.
+// Dropping a frame costs one sample out of thousands. Misattributing one silently
+// corrupts a register table, and nothing downstream would ever flag it.
+//
+// A *merged* run is a different case, and it is the common one. Measured over four
+// two-pack captures — about 4900 runs — every single run was an even multiple of the
+// two-pack cycle: 2, 4, 6 or 8, never 3, 5 or 7. The one odd run in the set was the
+// truncated first run of a ring buffer. The gap timing says the same thing: inside a
+// pair the frames are 60 ms apart, and where a run of 4 joins two pairs the gap is
+// 189 ms — exactly the two gaps that would have straddled a missing 0x81. So what goes
+// missing is the charger frame, not a battery frame, and a run of 4 is simply two
+// cycles with nothing lost from either.
+//
+// Those runs are therefore attributed by position modulo the cycle length instead of
+// being thrown away. The check that this is sound: inside the merged runs of one
+// capture, 143 frames carried an identity register (0x54/0x55/0x60/0x90/0xA0/0xA1)
+// whose value is fixed per pack, and all 143 landed on the pack that value belongs to,
+// with none wrong. It recovers about one frame in six.
+//
+// What would break it is a battery frame going missing *and* an 0x81 frame going
+// missing in the same run, in a pattern that leaves the length a multiple of the cycle
+// anyway. That needs at least two coincident losses of a kind we have never once
+// observed — the parity above says battery frames are not being lost at all — whereas
+// the old rule was paying a sixth of the data every day against it.
 class NBusCycleTracker {
 public:
-  static constexpr int  kMaxPerCycle = 6;   // battery responses buffered per cycle
+  // Deep enough to hold several merged cycles. Runs of 8 occur, and one capture had a
+  // 12. Beyond this the run is treated as overflow and dropped, which is the safe side.
+  static constexpr int  kMaxPerCycle = 12;  // battery responses buffered per run
   static constexpr int  kMinCycles   = 8;   // observed cycles before the length is trusted
   static constexpr int8_t kSolarSlot = -1;
   // The length histogram is halved once it reaches this many observations, so recent

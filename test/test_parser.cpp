@@ -275,23 +275,23 @@ int main() {
   // --- Vector 17: NBusCycleTracker attributes battery frames by ordinal position.
   {
     NBusCycleTracker t;
-    NBusCycleTracker::Out out[8];
+    NBusCycleTracker::Out out[NBusCycleTracker::kMaxPerCycle + 1];
     const uint8_t d0[4] = {0x4B, 0xFF, 0xFF, 0xFF};
     const uint8_t d1[4] = {0x3C, 0xFF, 0xFF, 0xFF};
     const uint8_t ds[4] = {0x05, 0x33, 0x00, 0x12};
 
     // Joining mid-cycle: the run we land in the middle of is incomplete, so the first
     // 0x81 frame only marks a starting point and releases nothing.
-    int n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+    int n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     check_int("v17 first 0x81 solar only", n, 1);
     check_int("v17 first 0x81 slot", out[0].slot, NBusCycleTracker::kSolarSlot);
 
     // Eight clean cycles: the length has to be observed before it can be trusted, so
     // the early ones are dropped rather than guessed at.
     for (int c = 0; c < 8; ++c) {
-      check_int("v17 batt buffered", t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8), 0);
-      check_int("v17 batt buffered", t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, 8), 0);
-      n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+      check_int("v17 batt buffered", t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]), 0);
+      check_int("v17 batt buffered", t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, sizeof out / sizeof out[0]), 0);
+      n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
       if (c < 7) {
         check_int("v17 early cycle dropped", n, 1);
       } else {
@@ -309,26 +309,56 @@ int main() {
 
     // A short run means a battery frame was lost. Every position after the gap would
     // be attributed to the wrong pack, so the whole run is thrown away.
-    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     check_int("v17 short run dropped", n, 1);
     check_int("v17 dropped after short", (int)t.cyclesDropped(), 8);
 
-    // A missing 0x81 frame merges two cycles; past kMaxPerCycle the run overflows and
-    // is likewise untrustworthy.
-    for (int i = 0; i < NBusCycleTracker::kMaxPerCycle + 1; ++i) {
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
+    // A missing 0x81 frame merges two cycles. Nothing is lost from either, so the run is
+    // attributed by position modulo the cycle length rather than thrown away — and it
+    // counts as the two cycles it actually is.
+    {
+      const uint32_t acc = t.cyclesAccepted();
+      const uint32_t drp = t.cyclesDropped();
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, sizeof out / sizeof out[0]);
+      n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
+      check_int("v17 merged run released", n, 5);
+      check_int("v17 merged slot 0", out[0].slot, 0);
+      check_int("v17 merged slot 1", out[1].slot, 1);
+      check_int("v17 merged slot 2", out[2].slot, 0);
+      check_int("v17 merged slot 3", out[3].slot, 1);
+      check_int("v17 merged data 2", out[2].d[0], 0x4B);
+      check_int("v17 merged data 3", out[3].d[0], 0x3C);
+      check_int("v17 merged counts two", (int)(t.cyclesAccepted() - acc), 2);
+      check_int("v17 merged not dropped", (int)(t.cyclesDropped() - drp), 0);
     }
-    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+
+    // An odd run is the case the rule exists for: a battery frame really is missing, so
+    // every position after the gap would shift onto the wrong pack. Still dropped.
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, sizeof out / sizeof out[0]);
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
+    check_int("v17 odd run dropped", n, 1);
+
+    // And past kMaxPerCycle the run no longer fits the buffer, so it is dropped whether
+    // its length is a multiple or not.
+    for (int i = 0; i < NBusCycleTracker::kMaxPerCycle + 1; ++i) {
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+    }
+    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     check_int("v17 overflow dropped", n, 1);
-    check_int("v17 dropped after ovf", (int)t.cyclesDropped(), 9);
+    check_int("v17 dropped after ovf", (int)t.cyclesDropped(), 10);
 
     // And it recovers: the next well-formed cycle is accepted again.
-    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-    t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, 8);
-    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+    t.feed(NBUS_NAD_BATTERY, 0x0B, d1, out, sizeof out / sizeof out[0]);
+    n = t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     check_int("v17 recovered", n, 3);
-    check_int("v17 accepted after ovf", (int)t.cyclesAccepted(), 2);
+    check_int("v17 accepted after ovf", (int)t.cyclesAccepted(), 4);
   }
 
   // --- Vector 18: a pack joining the bus must be noticed at once.
@@ -338,23 +368,23 @@ int main() {
   // moment on, so the epoch must move and the stale slots must be dropped.
   {
     NBusCycleTracker t;
-    NBusCycleTracker::Out out[8];
+    NBusCycleTracker::Out out[NBusCycleTracker::kMaxPerCycle + 1];
     const uint8_t d0[4] = {0x4B, 0xFF, 0xFF, 0xFF};
     const uint8_t ds[4] = {0x05, 0x33, 0x00, 0x12};
 
-    t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+    t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     for (int c = 0; c < 40; ++c) {  // one pack on the bus
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     }
     check_int("v18 one pack learned", t.expectedPerCycle(), 1);
     check_int("v18 epoch stable", (int)t.topologyEpoch(), 0);
     const uint32_t acc_before = t.cyclesAccepted();
 
     for (int c = 0; c < 400; ++c) {  // second pack joins
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     }
     check_int("v18 two packs learned", t.expectedPerCycle(), 2);
     check_int("v18 epoch moved", (int)t.topologyEpoch(), 1);
@@ -368,22 +398,22 @@ int main() {
   // Here the old length is given a very long run, so only decay lets the new one win.
   {
     NBusCycleTracker t;
-    NBusCycleTracker::Out out[8];
+    NBusCycleTracker::Out out[NBusCycleTracker::kMaxPerCycle + 1];
     const uint8_t d0[4] = {0x4B, 0xFF, 0xFF, 0xFF};
     const uint8_t ds[4] = {0x05, 0x33, 0x00, 0x12};
 
-    t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+    t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     for (int c = 0; c < 5000; ++c) {
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     }
     check_int("v19 long history len 1", t.expectedPerCycle(), 1);
 
     // A few hundred cycles of the new shape must be enough to switch over.
     for (int c = 0; c < 400; ++c) {
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, 8);
-      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, 8);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_BATTERY, 0x0B, d0, out, sizeof out / sizeof out[0]);
+      t.feed(NBUS_NAD_SOLAR, 0x02, ds, out, sizeof out / sizeof out[0]);
     }
     check_int("v19 relearned len 2", t.expectedPerCycle(), 2);
     check_int("v19 epoch moved", (int)t.topologyEpoch(), 1);

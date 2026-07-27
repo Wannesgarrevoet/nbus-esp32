@@ -81,11 +81,35 @@ is pack B" looks convincing and produces a clean-looking split. It is wrong twic
 and the charger's 0x81 frame marks where one cycle ends and the next begins. The *n*-th
 0x85 response after an 0x81 frame is always the same pack. There is no grey zone.
 
-The one failure mode left is a lost frame: if an 0x81 frame goes missing, two cycles merge;
-if a 0x85 frame goes missing, every position after the gap shifts onto the wrong pack. Both
-are caught by the same rule — **a run whose length does not match the learned cycle length
-is discarded rather than attributed.** Dropping a run costs one sample out of thousands;
-misattributing one silently corrupts a register table and nothing downstream would flag it.
+The one failure mode left is a lost frame: if a 0x85 frame goes missing, every position
+after the gap shifts onto the wrong pack. So **a run whose length is not a whole number of
+cycles is discarded rather than attributed.** Misattributing one frame silently corrupts a
+register table and nothing downstream would flag it.
+
+**Merged runs are not lost frames, and throwing them away was costing a sixth of the data.**
+The first version of this rule required the run length to *equal* the cycle length, which
+also discarded every run where an 0x81 frame had gone missing and two cycles had merged.
+That was about 12 % of all cycles, every day. Two measurements say those runs are intact:
+
+- Across four two-pack captures — roughly 4900 runs — **every run was an even multiple of
+  the two-pack cycle**: 2, 4, 6 or 8, never 3, 5 or 7. The single odd run in the whole set
+  was the truncated first run of a ring buffer. Frames are not being lost in pairs by
+  coincidence; battery frames are not being lost at all.
+- The gap timing agrees. Inside a pair the frames are 60 ms apart; where a run of 4 joins
+  two pairs the gap is 189 ms, which is exactly the two gaps that would have straddled a
+  missing 0x81 frame.
+
+So a run of 4 is two cycles with nothing missing from either, and position modulo the cycle
+length attributes it correctly. The check that this is sound: inside the merged runs of one
+capture, 143 frames carried a register whose value is fixed per pack (0x54, 0x55, 0x60,
+0x90, 0xA0, 0xA1), and **all 143 landed on the pack that value belongs to, none wrong.**
+Replaying the captures with the change drops the discard rate from ~12 % to ~0.5 %, and on
+the live bus from ~11 % to ~0.1 %, while the one-serial-per-slot assertion still holds.
+
+What would defeat it is a battery frame *and* an 0x81 frame going missing in the same run,
+in a pattern that leaves the length a multiple of the cycle anyway. That takes two
+coincident losses of a kind the parity measurement says are not happening, and the old rule
+was paying a sixth of the data every day to guard against it.
 
 The cycle length is *learned*, not hard-coded, and the histogram behind it decays so that
 recent cycles outweigh old ones. That is what lets the split survive a pack being added or
@@ -100,6 +124,31 @@ slot. See `test/replay_dump.cpp`, which is the check that matters — the hand-w
 vectors only prove the arithmetic, not the attribution. The captures themselves are kept
 out of this repository: they contain the devices' real serial numbers, and they are
 evidence about one particular installation rather than about the protocol.
+
+### What the split was actually for: how the two packs share current
+
+The reason to separate the packs is that averaging them hides the one thing worth knowing.
+Per-pack current (0x02) over four captures of the same installation, two packs in parallel:
+
+| capture | pack 1 (SoC 71–73 %) | pack 2 (SoC 99 %) | charger output |
+|---|---|---|---|
+| before the pack firmware update | +1.25 A | −0.20 A (down to −2.10 A) | 2.0 A |
+| just after it | +1.67 A | +0.50 A | 3.2 A |
+| a few hours later, charging | +0.46 A | +0.58 A | 2.4 A |
+| that evening, discharging | **−0.64 A** | **−0.00 A** (range −0.10…+0.12) | 0.24 A |
+
+Charging is shared. Discharging, in the last capture, is not: pack 1 supplied the entire
+house load and pack 2 supplied nothing, *despite sitting 26 SoC points higher*. Two packs in
+parallel share a terminal voltage, so the one with the higher open-circuit voltage should
+supply **more** current, not exactly none. And pack 2 is not incapable of it — before the
+firmware update it was discharging at up to 2.1 A.
+
+Two cautions on reading too much into this. The load was small (~0.6 A total), where the
+split is dominated by millivolt differences and cable resistance; and a persistent SoC gap
+between parallel packs is *not* by itself evidence of anything, because coulomb-counted SoC
+drifts apart whenever one pack is taken off the bus and is never re-synced. The current
+measurement is the evidence; the SoC gap is not. The measurement that would settle it is a
+real load — a few tens of amps — with both packs' 0x02 recorded through it.
 
 ## Device identity registers (both node types)
 
@@ -161,14 +210,14 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x54 | `idx K A A` | serial prefix, three ASCII characters in `d1..d3` | text | CONFIRMED (app + label) |
 | 0x55 | `idx ** ** **` | serial number, 24-bit big-endian in `d1..d3` (= 2****53) | — | CONFIRMED (app + label) |
-| 0x60 | `f0 00 A 00` | `d2` = bus address | — | CONFIRMED (app) |
+| 0x60 | `f0 00 A 00` | `d2` = bus address. `d0` is not the same on both packs — 0x60 on accu 1, 0x40 on accu 2, 0x42 on the charger — and each device keeps its own value across a firmware update and an address change, so it is a device property rather than a slot or address artefact | — | CONFIRMED (app) for `d2`; `d0` UNRESOLVED |
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
-| 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the same range as SoC and differing per pack (accu 1 `4C 4B 4C 0A` = 76/75/76, accu 2 `4B 4B 4B 0A` = 75/75/75), plus a constant 10. Per-cell or per-string SoC is the obvious reading, but three values for a four-cell pack does not fit it | ? | UNRESOLVED |
+| 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the 75–76 range plus a constant 10. **Not state of charge** — see the correction below | ? | UNRESOLVED |
 | 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 x` on 5.1 | **not a constant** — see the correction below. Held 270/270 through everything on 4.x; on 5.1 the first three bytes are zero and `d3` is a small per-pack value that *moves*: the capture had accu 1 = 1 and accu 2 = 0 over 39 frames, a later live reading had 1 and 2 | — | UNRESOLVED |
-| 0x0C | `02 E4 FF FF` | not a constant and not a counter: sits on a multiple of 10, dithers one step either way, and the centre rises with state of charge (740 at 50 %, 780 at 73 %). **Both packs report byte-identical values** in every cycle of the post-update capture, at moments when 0x14 differs between them — so whatever it measures is not pack-local | ? | UNRESOLVED |
+| 0x0C | `02 EE FF FF` | always an exact multiple of 10, and **byte-identical on both packs** in every cycle of every two-pack capture, including moments when their SoCs are 26 points apart — so it is not pack-local. Over one day it read 730 → 740 → 750 and never fell. The earlier reading that its centre rises with SoC does not survive that; see the correction below | ? | UNRESOLVED |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
-| 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per pack** — was read as a constant 2 while both packs were being averaged into one entity. Whatever it is, it is pack-local, unlike 0x0C | — | UNRESOLVED |
+| 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per device, and is a state rather than a constant.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 has read 0 in every capture except the ~2 minutes right after its own firmware update, where it read 2 and then fell back to 0 — the transition is in the capture. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A before the update while reading 0 | — | UNRESOLVED |
 
 > **Correction: 0x90 is not a constant, and it is not two temperature sensors.**
 > On firmware 4.x this register read `01 0E 01 0E` — two identical 16-bit values of 270 —
@@ -184,6 +233,33 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > The general lesson is the one recorded under the identity registers: **a field that never
 > moves is unexplained, not explained.** The confident reading and the correct reading were
 > distinguishable only by data that did not exist yet.
+
+> **Correction: 0x14 is not per-cell state of charge, and 0x0C does not track state of charge.**
+> Both readings were written down while the two packs were still being averaged into a single
+> set of entities. Splitting them apart killed both.
+>
+> 0x14 was read as a per-cell or per-string SoC because its three bytes sat in the SoC range
+> and differed between the packs (76/75/76 against 75/75/75). They differ the way two
+> measurements of the same thing differ. In the four two-pack captures the packs' own SoCs
+> are **73 % and 99 %** — 26 points apart — while 0x14 reads 75–76 on *both*, and in the most
+> recent capture both packs report the identical triple `4C 4B 4C`. A per-cell SoC on a pack
+> that is 99 % full cannot read 75. Whatever 0x14 is, it does not follow the pack's charge
+> state, and the ±1 wander is shared between packs rather than independent.
+>
+> 0x0C was read as rising with SoC, on 740 at 50 % and 780 at 73 %. Across a day of captures
+> it read 730 (SoC 64), 730 (66), 740 (71), 750 (73) and 750 (73) — and it is byte-identical
+> on two packs whose SoCs are 73 and 99. It moves in exact steps of 10 and, over that whole
+> day, only upward. That is the shape of a slowly accumulating quantity that happens to
+> correlate with SoC on a day when SoC was also rising, not of an SoC reading.
+>
+> **The test that separates these.** Both hypotheses now make a prediction that a deep
+> discharge falsifies in one direction or the other: an SoC-like field must come back down,
+> an accumulator cannot. Neither register has yet been watched through one.
+>
+> The methodological point is the reason multi-pack support was worth building at all. A
+> second, nominally identical device on the same bus is a control. Two of the register
+> readings here survived years of single-pack observation and did not survive a week of
+> having something to compare against.
 
 > **The firmware update destroyed data, and there was no warning.** Updating accu 1 from
 > 4.2 to 5.1 reset its cumulative energy counters (0x35) from 3530 / 2956 Wh to 1–2 Wh.
@@ -337,23 +413,21 @@ noisy tap cannot invent a register. The 300 s capture behind the entries above y
   loss would separate the two**, which makes them worth publishing to MQTT even unnamed.
   They stayed zero throughout the 2026-07-26 drive, including engine cranking, so they are
   at least not set by ordinary events.
-- **What 0x0C is.** Not a cycle count, and not monotonic — see the drive capture below.
-  It sits on a multiple of 10, dithers by one step, and the centre climbs with state of
-  charge. That rules out the counter reading it was given the same day, and leaves an
-  analogue quantity quantised to 10 units. The second pack has now narrowed it further:
-  **both packs publish byte-identical 0x0C in every cycle** while their SoC (0x0B) and
-  their new 0x14 differ. A quantity that is genuinely pack-local cannot be identical on two
-  packs at different states of charge, so either 0x0C is a bus-level or bank-level figure
-  that both nodes echo, or the two packs simply happened to agree — which 171 consecutive
-  matching frames make hard to believe. Correlating its centre against SoC, remaining Wh
-  and pack voltage over a full discharge-to-recharge cycle is still the next step, but it
-  should now be done **per pack**, watching for the moment they diverge.
-- **What 0x14 is** (new in firmware 5.1, absent on 4.x). `d0..d2` are three byte values in
-  the SoC range that differ per pack (76/75/76 against 75/75/75) and `d3` is a constant 10.
-  Per-cell state of charge is the obvious reading and would explain why it appeared exactly
-  when the packs were updated — but these packs have four cells, not three, and the fourth
-  byte is not in range. Watching whether the three bytes track 0x0B during a deep discharge
-  would settle it.
+- **What 0x0C is.** It sits on an exact multiple of 10 and is **byte-identical on both packs
+  in every cycle** while their SoC (0x0B) is 26 points apart, so it is not pack-local: either
+  a bus-level or bank-level figure that both nodes echo, or something the packs derive from a
+  shared input. Across one day it read 730 → 740 → 750 and never fell. Both earlier readings
+  are now dead — not a cycle counter, and not SoC-following either. What is left is a slow,
+  coarse, shared quantity, and the single measurement that would separate an accumulator from
+  a state is a **deep discharge**: an accumulator cannot come back down.
+- **What 0x14 is** (new in firmware 5.1, absent on 4.x). Three bytes in the 75–76 range plus
+  a constant 10. It is **not** per-cell state of charge: the pack at 99 % reports the same
+  75–76 as the pack at 73 %, and in the latest capture both packs report the identical
+  `4C 4B 4C`. The values wander by ±1 and the two packs wander together, which is what a
+  shared input looks like and not what four independent cells look like. Whether it tracks
+  pack voltage — the one input the two packs genuinely share, since they sit in parallel —
+  is the obvious next test, and a charge to absorption voltage would answer it: a
+  voltage-derived figure has to move a long way while 0x0B barely moves at all.
 - **What `d3` of 0x90 is.** On firmware 5.1 the register reads `00 00 00 x` with a small
   per-pack `x`. The capture showed 1 on pack 1 and 0 on pack 2, stable across all 39 frames,
   which looked like a fixed per-pack flag; a later live reading showed 1 and **2**, so it is

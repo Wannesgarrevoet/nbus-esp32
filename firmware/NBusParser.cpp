@@ -243,10 +243,10 @@ int NBusCycleTracker::feed(uint8_t nad, uint8_t reg, const uint8_t* d,
       Out& o = pending_[nPending_];
       o.reg = reg;
       std::memcpy(o.d, d, 4);
-      o.slot = static_cast<int8_t>(nPending_);
+      o.slot = -1;  // assigned when the run closes and its length is known
       nPending_++;
     } else {
-      overflow_ = true;  // two cycles merged; the whole run is untrustworthy
+      overflow_ = true;  // more merged cycles than we can hold; drop the run
     }
     return 0;
   }
@@ -257,11 +257,15 @@ int NBusCycleTracker::feed(uint8_t nad, uint8_t reg, const uint8_t* d,
   int n = 0;
   if (started_ && !overflow_) {
     noteLength(nPending_);
-    if (expected_ > 0 && nPending_ == expected_) {
+    // A run of exactly one cycle, or of several merged by lost 0x81 frames, is
+    // attributed by position modulo the cycle length. Anything else is dropped.
+    if (expected_ > 0 && nPending_ > 0 && nPending_ % expected_ == 0) {
       for (int i = 0; i < nPending_ && n < outMax; ++i) {
-        out[n++] = pending_[i];
+        out[n] = pending_[i];
+        out[n].slot = static_cast<int8_t>(i % expected_);
+        n++;
       }
-      accepted_++;
+      accepted_ += static_cast<uint32_t>(nPending_ / expected_);
     } else if (nPending_ > 0) {
       dropped_++;
     }

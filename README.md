@@ -115,11 +115,16 @@ frame that distinguishes them, so a decoder written for one pack silently averag
 This firmware splits them by **ordinal position in the poll cycle**. The master polls the
 nodes in a fixed rotation; the charger's NAD 0x81 is unique, so its frames delimit the
 cycle, and the battery answers between two charger frames are pack 1, pack 2, … in order.
-Runs whose length does not match the learned cycle length are **discarded rather than
-attributed** — losing one sample in thousands costs nothing, while misattributing one
-quietly corrupts a register table. Splitting on inter-frame timing was tried first and
-abandoned: it leaked frames between packs, and it broke outright when a firmware update
-reshuffled the poll order.
+Runs whose length is not a whole number of cycles are **discarded rather than attributed** —
+losing one sample in thousands costs nothing, while misattributing one quietly corrupts a
+register table. Splitting on inter-frame timing was tried first and abandoned: it leaked
+frames between packs, and it broke outright when a firmware update reshuffled the poll order.
+
+A run that is *longer* than one cycle is kept, not dropped. Those runs turned out to be
+cycles merged by a missing charger frame, with both battery answers intact: across four
+captures every run was an even multiple of the two-pack cycle, and inside the merged runs
+every frame carrying a per-pack-fixed register landed on the right pack. Requiring an exact
+match was discarding about one cycle in eight for nothing.
 
 The cycle length is learned and re-learned, so a pack can be switched on or off while the
 device is running. When the length changes, everything held per slot is discarded — slot 1
