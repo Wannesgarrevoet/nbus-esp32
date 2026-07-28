@@ -213,11 +213,11 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x60 | `f0 00 A 00` | `d2` = bus address. `d0` is not the same on both packs — 0x60 on accu 1, 0x40 on accu 2, 0x42 on the charger — and each device keeps its own value across a firmware update and an address change, so it is a device property rather than a slot or address artefact | — | CONFIRMED (app) for `d2`; `d0` UNRESOLVED |
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
-| 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three byte values in the 75–76 range plus a constant 10. **Not state of charge** — see the correction below | ? | UNRESOLVED |
+| 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three temperatures as `°C + 50`, one byte each, whole degrees, and **three physically separate sensors** — they spread to 2 °C in a fixed order under a 50 A charge. Responds fast; this is the register to use for live pack temperature. `d3 = 0x0A` is constant and is probably the scale factor 10 that turns them into 0x0C's units. **Not state of charge** — see the correction below | °C | CONFIRMED (independent sensor) |
 | 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 n` on 5.1 | **not a constant and not a temperature** — see the correction below. On 5.1 the first three bytes are zero and `d3` is a small per-pack number that matches the pack's **position in the poll cycle**: 1 on slot 1 and 2 on slot 2, in every one of 1364 consecutive complete cycles, without an exception. An earlier capture read 1 and 0, so the numbering is not fixed for all time | — | LIKELY for `d3` = poll-cycle index; `d0..d2` UNRESOLVED |
-| 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`, always an exact multiple of 10. **Per-pack, and it dithers.** On 2026-07-28 one pack held 740 unbroken while the other alternated 740/730 nine times in twenty seconds and settled on 730. Earlier captures where it was byte-identical on both packs are explained by both sitting in the same bucket, not by it being a shared figure. Neither an SoC reading nor a counter — see the corrections below | ? | UNRESOLVED |
+| 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`: **pack temperature** as `(°C + 50) × 10`, so 730 = 23 °C. Always an exact multiple of ten because the pack measures whole degrees; it dithers when a sensor sits on a degree boundary. **Lagged** — a first-order response with a time constant of about 3 hours. Unity gain, so it is right once things settle, but it trails badly during a change; prefer 0x14 for a live reading. Neither an SoC reading nor a counter — see the corrections below | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
-| 0xF2 | `00 02 00 00` on accu 1, `00 00 00 00` on accu 2 | **differs per device, and is a state rather than a constant.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 has read 0 in every capture except the ~2 minutes right after its own firmware update, where it read 2 and then fell back to 0 — the transition is in the capture. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A before the update while reading 0 | — | UNRESOLVED |
+| 0xF2 | `00 02 00 00` on both accus since 2026-07-27 20:07 | **a state, and no longer one that tells the packs apart.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 read 0 for months, went to 2 for ~2 minutes right after its own firmware update, fell back, and then went to 2 again on 2026-07-27 at 20:07 local and has stayed there since — so "accu 2 reads 0" is dead. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. The 20:07 transition is the one to explain; it falls within minutes of the solar charger dropping from 2.1 A to zero | — | UNRESOLVED |
 
 > **Correction: 0x90 is not a constant, and it is not two temperature sensors.**
 > On firmware 4.x this register read `01 0E 01 0E` — two identical 16-bit values of 270 —
@@ -255,36 +255,206 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > is the valuable one, so the test is worth doing deliberately rather than waiting for it to
 > happen by accident.
 
-> **Correction: 0x14 is not per-cell state of charge, and 0x0C does not track state of charge.**
-> Both readings were written down while the two packs were still being averaged into a single
-> set of entities. Splitting them apart killed both.
+> **Correction: 0x14 and 0x0C are temperature, not state of charge and not an accumulator.**
+> Both SoC readings were written down while the two packs were still being averaged into a
+> single set of entities. Splitting them apart killed both; a night of Home Assistant history
+> then supplied what they actually are. The path is worth keeping because two wrong answers
+> were passed through on the way, and both were plausible at the time.
 >
 > 0x14 was read as a per-cell or per-string SoC because its three bytes sat in the SoC range
 > and differed between the packs (76/75/76 against 75/75/75). They differ the way two
 > measurements of the same thing differ. In the four two-pack captures the packs' own SoCs
 > are **73 % and 99 %** — 26 points apart — while 0x14 reads 75–76 on *both*, and in the most
 > recent capture both packs report the identical triple `4C 4B 4C`. A per-cell SoC on a pack
-> that is 99 % full cannot read 75. Whatever 0x14 is, it does not follow the pack's charge
-> state, and the ±1 wander is shared between packs rather than independent.
+> that is 99 % full cannot read 75.
 >
 > 0x0C was read as rising with SoC, on 740 at 50 % and 780 at 73 %. Across a day of captures
 > it read 730 (SoC 64), 730 (66), 740 (71), 750 (73) and 750 (73), and in every one of those
-> it was byte-identical on two packs whose SoCs are 73 and 99. That is what kills the SoC
-> reading, and it is the part of this paragraph that still stands.
+> it was byte-identical on two packs whose SoCs are 73 and 99. Its replacement — a slowly
+> accumulating quantity shared by both packs — did not survive either: it reverses, so it
+> accumulates nothing, and on 2026-07-28 the two packs read 740 and 730 at the same moment.
 >
-> What was put in its place — a slowly accumulating quantity, shared by both packs — did not
-> survive either, and it took two separate observations to finish it off. It reverses, so it
-> accumulates nothing (see the drive note further down). And it is **not shared**: on
-> 2026-07-28 the two packs read 740 and 730 at the same moment.
->
-> **The test that separates these.** A deep discharge still discriminates for 0x14: an
-> SoC-like field must come back down, an accumulator cannot. For 0x0C the accumulator
-> reading is already dead, and the open question is narrower — see below.
+> **Both are the same quantity, and that quantity is temperature.** See the temperature
+> encoding section below. 0x0C is `(°C + 50) × 10`; the three 0x14 bytes are `°C + 50` in
+> whole degrees. Everything that had to be retracted follows from that and needed no separate
+> explanation: an exact multiple of ten because the source is a whole degree; reversal because
+> temperature reverses; a difference between packs because they do not sit at the same
+> temperature; dithering because a sensor can land exactly on a degree boundary; and an
+> apparent SoC correlation because the day it was measured, the sun warmed the van while the
+> panels charged the packs.
 >
 > The methodological point is the reason multi-pack support was worth building at all. A
 > second, nominally identical device on the same bus is a control. Two of the register
 > readings here survived years of single-pack observation and did not survive a week of
-> having something to compare against.
+> having something to compare against. The temperature answer needed a third thing: an
+> independent sensor measuring the same physical quantity, which is what the IBS meter and
+> the van's own climate sensors are.
+
+## The temperature encoding
+
+Every temperature on this bus is `(raw / 10) − 50` degrees Celsius. The offset makes the
+range roughly −50 to +205 °C, and it is why these registers all read in the 700–1000 band
+and never looked like temperatures. Note that the more common automotive convention is an
+offset of 40, not 50; 50 is what the data fits, but it is not the value to guess from
+habit if a fourth temperature register turns up.
+
+| where | register | resolution | example |
+|-------|----------|-----------|---------|
+| battery | 0x0C, 16-bit in `d0 d1` | whole degrees, so always ×10 | 730 = 23 °C |
+| battery | 0x14, bytes `d0 d1 d2` | whole degrees, offset only, no ×10 | 73 = 23 °C |
+| charger | 0x11, 16-bit in `d0 d1` | full 0.1 °C — consecutive counts observed | 815 = 31.5 °C |
+
+The first evidence was a night of Home Assistant history on 2026-07-27/28, in which
+everything cooled from about 26 °C to 22 °C. Against the IBS meter's battery temperature — an
+independent sensor, on the same bank, from another manufacturer — the packs' 0x14 byte 0
+correlates at **r = 0.93 and 0.83** and 0x0C at **0.82 and 0.83**, while the van's inside
+and outside temperatures, used as controls, reach only 0.50–0.53. After subtracting the
+offset, the packs read **+0.4 to +1.2 °C** above the IBS with a standard deviation below
+0.7 — the size of a difference in sensor placement, not of a wrong scale.
+
+The charger's 0x11 is the stronger evidence of the two, because it is not a correlation.
+Over the 24 h to 2026-07-28 it peaks at 973 → **47.3 °C** at 19:02, when the panels were
+delivering 3.05 A and the van read 30.0 °C inside — 17.3 °C above its own surroundings —
+and falls to 677 → 17.7 °C at 03:01 at zero output. A heatsink does that; the absolute
+values only land in the right place if the offset really is 50, and the same constant has
+now been read off two devices from different manufacturers.
+
+The cold end is the weaker half of that argument and should not be overstated. At 02:13 the
+charger reads 18.4 °C against 18.5 °C outside, which looks like an exact settle, but at its
+own minimum an hour later it reads 17.7 °C against 20.0 °C outside — 2.3 °C *below* ambient,
+which no passive heatsink does. Either the charger's sensor is offset from the van's outside
+sensor, or the two are measuring genuinely different air. The overnight *shape* is what
+carries the argument; the overnight *absolute agreement* is a coincidence of one sample.
+
+**Fahrenheit is excluded, and not by the offset fit.** `raw − 50` read as °F crosses
+`(raw / 10) − 50` read as °C at exactly 22.5 °C, and the first night of data sat right on
+that crossing — so the mean bias against the IBS actually *favoured* Fahrenheit (−0.21 and
++0.07 °C, against Celsius's +0.63 and +1.14). The discriminator is the slope: one Fahrenheit
+count is 0.556 °C, one Celsius count is 1.000. Whenever this reading is re-tested, test the
+slope; the offset fit will agree with the wrong answer.
+
+### The 2026-07-28 morning settles it
+
+The map asked for a reversal, and got one for free. Between 00:00 and 10:00 the packs cooled
+from 24 °C to their minimum at 08:00–09:00 and then turned back up, while the solar charger
+went from nothing to 5.1 A. Over 66 ten-minute samples against the IBS meter:
+
+| | vs IBS | vs charge current | slope on IBS | offset from the fit |
+|---|---|---|---|---|
+| accu 1 0x0C | **+0.98** | −0.53 | 0.952 ± 0.028 | **49.9** |
+| accu 2 0x0C | **+0.98** | −0.55 | 0.982 ± 0.029 | **50.5** |
+| accu 1 0x14 b0 | +0.95 | −0.28 | 1.075 ± 0.056 | 52.4 |
+| accu 2 0x14 b0 | +0.97 | −0.35 | 1.170 ± 0.042 | 54.4 |
+| charger 0x11 | −0.52 | **+0.96** | — | — |
+
+Three things fall out of this at once.
+
+**The offset is 50, to within half a degree.** It no longer has to be assumed: extrapolating
+the regression to 0 °C gives 49.9 and 50.5 on the two packs independently. The earlier
+"50 ± 1" was as good as the cooling curve allowed; a turning point is worth more than a
+longer straight line. 0x14's single byte gives a worse offset here (52–54) because
+one-degree quantisation on a 5 °C swing steepens the apparent slope. *(An earlier revision
+concluded from this that 0x0C is the estimator to use rather than 0x14. The drive that
+afternoon reversed it — see below.)*
+
+**Fahrenheit is now 14 standard errors away** on both packs' 0x0C, against 2 or less for
+Celsius. That question is closed.
+
+**Charge current is excluded as the driver, decisively.** This is what the reversal bought.
+Current ran 0 → 5.1 A from 06:00 to 10:00 while both packs kept *falling* until 09:00; the
+correlation with current is negative on all four pack registers. Nothing charge-related
+behaves that way, which retires the state-of-charge and accumulator readings for good rather
+than merely leaving them unsupported.
+
+The charger sits on the other side of the same table and is the control that worked. It ran
+17.0 → 51.0 °C in five hours, correlating +0.96 with its own output current and −0.52 with
+the packs, while they moved one degree. Same encoding, opposite driver: a heatsink under
+load against two thermal masses tracking the air. The van's own inside and outside sensors
+could not serve as controls here — they have exactly one recorder point in the window and
+are flat by artefact, not by physics.
+
+### 0x0C is not derivable from 0x14
+
+`d3 = 0x0A` in 0x14 is still probably the factor 10 that converts its bytes to 0x0C's scale,
+but the tempting next step — that 0x0C is a summary of 0x14's three sensors — **does not
+survive the full dataset**. Pairing every 0x0C frame with the nearest 0x14 frame in time
+across all captures (n = 3825) and testing six aggregators:
+
+| aggregator | exact match |
+|---|---|
+| byte 2 alone | 62.6 % |
+| rounded mean | 57.3 % |
+| truncated mean | 50.0 % |
+| minimum | 48.8 % |
+| maximum | 38.3 % |
+| byte 0 alone | 32.9 % |
+
+None of them is the rule, and the afternoon drive explains why: **0x0C lags**, so no
+instantaneous pairing can ever reproduce it. An earlier revision of this section claimed the
+rounded mean fit every window; that was four hand-picked windows and it was overfitting —
+recorded here because it is the third reading of these two registers to be withdrawn.
+
+Over the 3825 overnight pairs `0x0C / 10` and the mean of 0x14's bytes never differ by more
+than **1.0 °C**, centred about +0.2 °C. That agreement is a property of a slow night, not of
+the registers: under the drive below the same difference reached **5.3 °C**. The three 0x14
+bytes themselves differ by 1 °C in 75 % of overnight frames and never by more than 2 °C. So they are
+measuring the same pack and are consistent with each other, but 0x0C is sampled or filtered
+on its own schedule and cannot be reconstructed from the other three.
+
+### The 2026-07-28 drive: 0x0C is slow, 0x14 is not
+
+Four short engine runs between 11:55 and 13:08 (about 36 minutes of driving in total, from
+the Westfalia bus's own `ontsteking` / `motor` and the Orion's `charge_state`) put roughly
+50–56 A of alternator charge into the bank and heated it 20 → 29.5 °C in two and a half
+hours — four times faster than any change the registers had been characterised on. The two
+pack registers came apart immediately, and re-regressing them on the IBS over just that
+window shows how far:
+
+| | slope on IBS, slow morning | slope on IBS, fast drive |
+|---|---|---|
+| accu 1 0x14 b0 | 1.075 | 1.160 |
+| accu 2 0x14 b0 | 1.170 | 1.505 |
+| accu 1 0x0C | 0.952 | **2.325** |
+| accu 2 0x0C | 0.982 | **2.351** |
+
+0x14 keeps roughly unity. 0x0C needs 2.33 °C of real temperature per degree it reports, and
+by the end of the drive it read 25 °C while 0x14 on the same pack read 30–31 °C and the IBS
+read 29.5 °C. **That is a lag, not a different scale**, because the same register tracked
+1:1 through the slow night.
+
+**The evening confirmed it, and measured the time constant.** The prediction written here at
+13:20 was that 0x0C would keep climbing toward 30 °C after the engine stopped while 0x14
+flattened. It did. 0x14 sat at exactly 30 °C on both packs for the following eight hours
+while 0x0C walked up 25 → 26 → 27 → 28 → 29 and stopped, and the IBS held 29.5–30.0
+throughout. Fitting the closing gap as an exponential gives a first-order time constant of
+**2.7 h on accu 1 and 3.5 h on accu 2**, decaying from 5.6 K and 4.3 K to about 1 K.
+
+That kills the "43 % of the true rate" reading written earlier the same afternoon. **A
+first-order lag has unity gain**; under a ramp its output ends up rising at the same rate as
+its input, displaced in time. The 2.33 slope was the transient part of a ramp response
+measured over 2.5 h — less than one time constant — not a gain. Tonight's full convergence
+is the proof: a register with a gain of 0.43 could not have closed to within 1 °C. So:
+
+- **Use 0x14 for temperature, not 0x0C.** 0x0C's offset of 50 is right and its settled value
+  is right to about a degree; it simply trails by hours. That is exactly the wrong behaviour
+  if it were ever used for a high-temperature warning, and exactly the right behaviour if
+  what you want is a pack's bulk temperature rather than its skin.
+- At equilibrium tonight both packs read 0x0C = 29 °C against 0x14 = 30 °C, a −1.0 °C
+  offset that sits at the edge of the ±1 °C envelope measured overnight. Whether that is
+  placement or a rounding rule is not worth chasing yet.
+
+Two other things the drive settled.
+
+**0x14's three bytes are three physically separate sensors.** Overnight they sit within
+1 °C of each other and could have been one sensor reported three times. Under 50 A they
+spread to 2 °C and, more tellingly, in a fixed order — byte 1 consistently the coolest
+during the rise (29 / 27 / 28 at 12:47). A single value copied three times cannot do that.
+
+**The hotter pack is the one doing the work.** Accu 1 took 30–35 A throughout while accu 2
+took 20–24 A, and accu 1 ran about 1.5–2 °C hotter for the whole drive. That is an
+independent physical check on two separate readings at once — the per-pack current split
+from the ordinal attribution, and the temperature scale — and neither was used to derive
+the other.
 
 > **The firmware update destroyed data, and there was no warning.** Updating accu 1 from
 > 4.2 to 5.1 reset its cumulative energy counters (0x35) from 3530 / 2956 Wh to 1–2 Wh.
@@ -383,25 +553,46 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 |-----|-------|---------|------|--------|
 | 0x02 | `Vh Vl Ih Il` | charge voltage + solar charge current | V=0.01 V; I=0.01 A | CONFIRMED |
 | 0x01 | `Vh Vl` | starter-battery voltage | 0.01 V | CONFIRMED |
-| 0x1B | `Vh Vl (FF FF)` | panel/input voltage | 0.01 V (13.5–24.5 V observed) | LIKELY |
+| 0x1B | `Vh Vl (FF FF)` | panel/input voltage. **The dark test has now run itself**: it sits at 0x000A = 0.10 V all night and steps to 13.28 V within one capture of first light, then 14.86 → 21.99 V as the sun climbs | 0.01 V (0.10 V dark, 13.5–24.5 V lit) | CONFIRMED (dark test) |
 | 0x1C | `xh xl (FF FF)` | flickers 0/1/2/5 with no correlation to charge current | ? | UNRESOLVED |
 | 0x35 | `Eh El 00 00` | cumulative energy produced — rose 178 → 183 and **only while the panel was delivering**, mirroring the battery's 0x35 layout | ~1 Wh/count | LIKELY |
-| 0x11 | `xh xl (FF FF)` | slow-moving, ~1016–1038. Falls while output is low and rises while it is high, but lags far behind — a filtered or accumulated quantity, not an instantaneous one | ? | UNRESOLVED |
+| 0x11 | `xh xl (FF FF)` | **charger temperature** as `(°C + 50) × 10`, in consecutive counts, so the full 0.1 °C. Correlates **+0.96 with its own output current** and −0.52 with the packs: 17.0 °C at dawn to 51.0 °C at 5.1 A five hours later, while the packs moved one degree. The lag that looked like filtering or accumulation is a heatsink. Same encoding as the packs' 0x0C | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0x0B | `b0` | 78 — same layout as the battery's SoC register, but the battery reported 56 % at the same moment | % | UNCERTAIN |
 | 0x54 | `01 41 43 44` | serial prefix, three ASCII characters in `d1..d3` ("ACD") | text | CONFIRMED (app + label) |
 | 0x55 | `00 ** ** **` | serial number, 24-bit big-endian in `d1..d3` (= 2****99) | — | CONFIRMED (app + label) |
-| 0x60 | `42 03 0D 00` | `d2` = bus address (13; was 9 before the update) | — | CONFIRMED (app) |
+| 0x60 | `42 s 0D 00` | `d2` = bus address (13; was 9 before the update). **`d1` is not identity** — it is 3 by day and 0 by night, switching with 0x26 `d3` (see below) | — | CONFIRMED (app) for `d2`; `d1` = charger state |
 | 0xA0 | `01 01 00 05` | `d1` = IAD, `d2 d3` = model number (1 / 0005) | — | CONFIRMED (app) |
 | 0xA1 | `05 04 03 04` | firmware version `d0`.`d1` = 5.4 | — | CONFIRMED (app) |
-| 0x26 / 0xD0 | constant | `01 00 05 03` / `00 20 00 00` | — | UNRESOLVED |
+| 0x26 | `01 00 05 s` | **not constant** — `d3` is 3 by day and 0 by night, moving in the same capture as 0x60 `d1` | — | LIKELY (charger state) |
+| 0xD0 | constant | `00 20 00 00` | — | UNRESOLVED |
 | 0x0C / 0xC0 / 0xE0 / 0xF0 / 0xF1 | `FF FF FF FF` or all zero | never move; candidate unsupported-parameter and alarm/fault slots | — | UNRESOLVED |
 
 > **Why 0x1B is read as panel voltage.** It looks like noise at first — 187 distinct values
 > in 222 samples, swinging 13.5–24.5 V from one frame to the next. But the sequence is not
 > random: it repeatedly dips to ~14.2 V and then jumps straight to ~24.2 V, roughly every
 > five samples. That sawtooth is an MPPT sweeping its operating point, and the range sits
-> exactly between battery voltage and a 12 V panel's open-circuit voltage. The decisive
-> test is still to **cover the panel** and check the value collapses.
+> exactly between battery voltage and a 12 V panel's open-circuit voltage. The decisive test
+> was to cover the panel and check the value collapses; **nightfall performed it**, and it
+> collapses to 0.10 V.
+
+> **The charger has a day/night state, and two registers carry it.** On 2026-07-28 the
+> 05:13 capture shows 0x26 = `01 00 05 00` and 0x60 = `42 00 0D 00`; the 06:13 capture shows
+> `01 00 05 03` and `42 03 0D 00`, and they have held 3 all day. The same capture is the one
+> where 0x1B leaves 0.10 V and charge current first becomes non-zero, so the trigger is
+> input from the panel rather than a clock.
+>
+> Both registers were previously written down as constants, because every capture used to
+> characterise them was taken by day. `01 00 05 03` and `42 03 0D 00` are in this document as
+> fixed values for exactly that reason — a reminder that "constant across all captures" is
+> only as strong as the diversity of the captures, and that hourly sampling around the clock
+> is what exposed it. The charger's 0x60 `d1` is the more consequential of the two: 0x60 is
+> the bus-address register and its other bytes really are identity, so `d1` was assumed to be
+> as well.
+>
+> What the value 3 *means* is open. It is not a simple boolean, or it would be 1. A bulk /
+> absorption / float stage number is the obvious guess, and it predicts that `d1` takes other
+> values later in a full charge — which is checkable at no cost from the same hourly captures
+> on a day that reaches absorption.
 
 ## Verification (capture 4/5/6 vs app)
 
@@ -491,33 +682,37 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
 
 ## Still to determine
 
-- Whether 0xC0 / 0xF0 / 0xF1 / 0xF2 really are alarm bitmaps. They are all zero on a
-  healthy bus, which is exactly what an alarm register looks like when nothing is wrong —
-  and also exactly what an unused register looks like. **A capture taken during a power
-  loss would separate the two**, which makes them worth publishing to MQTT even unnamed.
-  They stayed zero throughout the 2026-07-26 drive, including engine cranking, so they are
-  at least not set by ordinary events.
-- **What 0x0C is.** It sits on an exact multiple of 10, and that quantisation is the most
-  solid thing known about it. Three readings have now been retracted: not a cycle counter,
-  not SoC-following, and — as of 2026-07-28 — not shared between the packs either. In one
-  six-minute window one pack held 740 across 79 samples without a single flip while the
-  other alternated 740/730 nine times in twenty seconds and settled on 730, with the
-  lower-SoC pack reading the higher value. The earlier captures where both packs matched
-  byte for byte are explained by both sitting in the same bucket of ten, not by a shared
-  figure. It also reverses, so it accumulates nothing. What is left is a per-pack quantity,
-  coarse enough that a step of ten is its smallest move, that can sit exactly on a boundary
-  and dither across it. The open question is no longer *shared or local* but **what quantity
-  is quantised that coarsely** — a capacity or resistance estimate in units of ten would fit
-  the dithering; a slowly filtered measurement would not, because the filter would show
-  intermediate values.
-- **What 0x14 is** (new in firmware 5.1, absent on 4.x). Three bytes in the 75–76 range plus
-  a constant 10. It is **not** per-cell state of charge: the pack at 99 % reports the same
-  75–76 as the pack at 73 %, and in the latest capture both packs report the identical
-  `4C 4B 4C`. The values wander by ±1 and the two packs wander together, which is what a
-  shared input looks like and not what four independent cells look like. Whether it tracks
-  pack voltage — the one input the two packs genuinely share, since they sit in parallel —
-  is the obvious next test, and a charge to absorption voltage would answer it: a
-  voltage-derived figure has to move a long way while 0x0B barely moves at all.
+- Whether 0xC0 / 0xF0 / 0xF1 really are alarm bitmaps. They are all zero on a healthy bus,
+  which is exactly what an alarm register looks like when nothing is wrong — and also
+  exactly what an unused register looks like. **A capture taken during a power loss would
+  separate the two**, which makes them worth publishing to MQTT even unnamed. They stayed
+  zero throughout the 2026-07-26 drive, including engine cranking, so they are at least not
+  set by ordinary events.
+- **What 0xF2 = 2 means — and what it is not.** It has been caught changing twice on one
+  pack: briefly after a firmware update, and again on 2026-07-27 at 20:07 local, within
+  minutes of solar output falling to zero. That coincidence suggested a charge-related state,
+  and **the sunrise of 2026-07-28 refuted it**: 0xF2 held `00 02 00 00` on both packs through
+  every hourly capture from 00:13 to 10:13, across first light at 06:13 and across charge
+  current climbing from 0 to 5.1 A. Nothing charge-related stays still through that. The
+  reading now is that 2 is the resting value for a healthy pack and the 20:07 transition was
+  pack 2 settling into it late — which puts 0xF2 back alongside 0xC0 / 0xF0 / 0xF1 as a
+  register that needs a fault to reveal itself, with the difference that its healthy value is
+  2 rather than 0.
+- ~~Whether the temperature reading survives a real swing.~~ **Answered on 2026-07-28** — the
+  packs reversed at 08:00–09:00 in step with the IBS meter while the charger ran away to
+  51 °C on its own current. See *The 2026-07-28 morning settles it* above. The afternoon
+  drive then answered the two sub-questions as well: 0x14's bytes **are** three separate
+  sensors (they spread 2 °C in a fixed order under 50 A), and 0x0C cannot be reconstructed
+  from them because it is a **lagged** quantity, not an aggregate.
+- **Whether 0x0C's lag is a filter or thermal mass.** The time constant is now measured at
+  2.7–3.5 h (see the drive section), but not explained. A digital filter and a sensor potted
+  deeper in the cell stack look identical from the bus. A fast *electrical* transient with no
+  thermal content — a big load step at constant ambient — would separate them, since a filter
+  would still lag and a buried sensor would have nothing to lag behind.
+- **What the charger's state nibble counts.** 0x26 `d3` and 0x60 `d1` are both 3 whenever the
+  panel delivers and 0 when it does not. A bulk/absorption/float stage number is the obvious
+  guess and predicts other values on a day that charges to absorption; the hourly captures
+  will catch it without anything being set up.
 - **Whether `d3` of 0x90 belongs to the pack or to the slot.** It now reads 1 and 2 in poll
   order across 1364 consecutive cycles, which is why it is marked LIKELY as a poll-cycle
   index. The open half is what happens when the order changes: power one pack down and back
@@ -527,8 +722,8 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   frames; that would be circular, since the reading was derived from the attribution.
   Note also that an earlier capture read 1 and **0**, which the index hypothesis does not
   yet account for.
-- Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
-  cruder SoC estimate alongside the battery's coulomb-counted 56 %.
+- Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
+  coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
   project; the values themselves we do see on our bus.
 
@@ -568,8 +763,12 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
 > is therefore not a counter of anything. Recorded here as a caution: it was written up
 > as a monotonic counter earlier the same day on the strength of two readings, 730 and
 > 740, taken hours apart. Two samples of a dithering value look exactly like a counter.
-- Solar 0x11's slow monotonic fall, and whether solar 0x0B (78) is the charger's own
-  cruder SoC estimate alongside the battery's coulomb-counted 56 %.
+>
+> In hindsight this is a pack warming from 24 °C to 28 °C over two hours of driving and
+> then holding its heat after the engine stopped, which is exactly what the reading below
+> says it should do. The observation was right and the interpretation was missing a unit.
+- Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
+  coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
   project; the values themselves we do see on our bus.
 
