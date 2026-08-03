@@ -131,7 +131,10 @@ A run that is *longer* than one cycle is kept, not dropped. Those runs turned ou
 cycles merged by a missing charger frame, with both battery answers intact: across four
 captures every run was an even multiple of the two-pack cycle, and inside the merged runs
 every frame carrying a per-pack-fixed register landed on the right pack. Requiring an exact
-match was discarding about one cycle in eight for nothing.
+match was discarding about one cycle in eight for nothing — and not evenly. The charger only
+drops poll answers while it is actually charging: hourly captures put the merge rate at
+11–16 % with the charger running and 0.0 % with it off. The old rule therefore took all of
+its losses from the hours that have something to show, and none from the flat nights.
 
 The cycle length is learned and re-learned, so a pack can be switched on or off while the
 device is running. When the length changes, everything held per slot is discarded — slot 1

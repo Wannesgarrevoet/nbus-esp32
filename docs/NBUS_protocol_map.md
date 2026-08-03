@@ -113,6 +113,32 @@ in a pattern that leaves the length a multiple of the cycle anyway. That takes t
 coincident losses of a kind the parity measurement says are not happening, and the old rule
 was paying a sixth of the data every day to guard against it.
 
+**The missing 0x81 frames are the charger's own, and only while it is charging.** The merge
+rate is not a constant property of the bus. Across 26 hourly captures over four days it is
+**11–16 % whenever the charger reports a non-zero stage and 0.0 % whenever it reports 0** —
+five night captures in which every one of 1364–1365 runs was exactly 2, with not a single
+merge among them. On 2026-07-28 the 21:13 capture still ran at 11.7 % and the 22:13 one at
+0.0 %; on 08-03 the switch falls between the 19:13 capture and the shutdown timed at
+21:29:27. It follows the charge stage, not the hour.
+
+Two further properties pin down what is happening:
+
+- **Only the charger's frames go missing.** Odd runs — the signature of a lost 0x85 frame —
+  number 0 to 3 per capture out of ~1240. Battery frames are therefore almost never lost
+  while charger frames are lost ~15 % of the time, and that asymmetry rules out frame loss
+  in our own receiver: a deaf ESP would miss both nodes and would show up as odd runs.
+- **The losses are independent.** The successive ratios r4/r2, r6/r4 and r8/r6 all sit at
+  about the same value as the overall rate, so run length is geometrically distributed. There
+  is no period and no burst structure — the charger misses a poll response with a roughly
+  fixed probability the whole time its MPPT is running.
+
+This sharpens the case for keeping merged runs rather than discarding them. The cost of the
+old rule was not a sixth of the data spread evenly; it was **a sixth taken entirely from the
+hours the charger is working, and none at all from the hours it is not.** Every absorption
+plateau, every stage transition and every current peak sat in the part being thinned, while
+the flat nights came through complete. A filter that discards only during the interesting
+hours is worse than one that discards uniformly, and that is precisely what the old rule was.
+
 The cycle length is *learned*, not hard-coded, and the histogram behind it decays so that
 recent cycles outweigh old ones. That is what lets the split survive a pack being added or
 removed instead of stalling on a length the bus no longer uses.
