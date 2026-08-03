@@ -216,10 +216,10 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three temperatures as `°C + 50`, one byte each, whole degrees, and **three physically separate sensors** — they spread to 2 °C in a fixed order under a 50 A charge. Responds fast; this is the register to use for live pack temperature. `d3 = 0x0A` is constant and is probably the scale factor 10 that turns them into 0x0C's units. **Not state of charge** — see the correction below | °C | CONFIRMED (independent sensor) |
-| 0x90 | `0D 02 0C 02` on accu 2; `00 00 00 01` on accu 1 | **a four-byte shift register**, newest byte at `d3`, cleared by the 5.1 firmware update and refilling since — two shifts observed directly in HA history. Not a constant, not a temperature, and **not the poll-cycle index**: `d3` matched the slot only while one byte had been pushed. Pushes are rare, roughly twice a week, and their meaning is unknown. See the correction below | — | CONFIRMED (shift structure); byte meaning UNRESOLVED |
+| 0x90 | `0C 02 0D 02` on accu 2; `00 00 00 01` on accu 1 | **a four-byte event log, shifted left**, newest byte at `d3`, cleared by the 5.1 firmware update and refilling since — six pushes observed directly in HA history, in three `(0C\|0D, 02)` pairs. Not a constant, not a temperature, and **not the poll-cycle index**: `d3` matched the slot only while one byte had been pushed. `02` closes a pair; the opening code's meaning is unknown. See the correction below | — | CONFIRMED (shift structure + pairing); code meaning UNRESOLVED |
 | 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`: **pack temperature** as `(°C + 50) × 10`, so 730 = 23 °C. Always an exact multiple of ten because the pack measures whole degrees; it dithers when a sensor sits on a degree boundary. **Lagged** — a first-order response with a time constant of about 3 hours. Unity gain, so it is right once things settle, but it trails badly during a change; prefer 0x14 for a live reading. Neither an SoC reading nor a counter — see the corrections below | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
-| 0xF2 | `00 02 00 00` on both accus since 2026-07-27 20:07 | **a state, and no longer one that tells the packs apart.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 read 0 for months, went to 2 for ~2 minutes right after its own firmware update, fell back, and then went to 2 again on 2026-07-27 at 20:07 local and has stayed there since — so "accu 2 reads 0" is dead. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. The 20:07 transition is the one to explain; it falls within minutes of the solar charger dropping from 2.1 A to zero | — | UNRESOLVED |
+| 0xF2 | `d1` is 0 or 2 on both accus, and toggles | **a live status word, and no longer one that tells the packs apart.** "Accu 1 always reads 2, accu 2 reads 0" is dead twice over: a week of history has both packs toggling between 0 and 2 independently, several times each (accu 1: 2 → 0 on 07-29, back on 07-30, 0 on 08-02, back on 08-03; accu 2 similar but not in step). It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. **The `1A` excursion is the real clue** — see the 0x90 correction: on 07-31 accu 2's `d1` read `1A` for thirteen seconds and 0x90 logged a byte in the middle of it, which makes 0xF2 the live word and 0x90 its log | — | UNRESOLVED (status word; code space shared with 0x90) |
 
 > **Correction: 0x90 is not a constant, and it is not two temperature sensors.**
 > On firmware 4.x this register read `01 0E 01 0E` — two identical 16-bit values of 270 —
@@ -244,20 +244,23 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > `d3` followed the new position. That test was never run. A week of Home Assistant history
 > answered it anyway, and the answer is that the question was wrong.
 >
-> Accu 2 passed through these four values:
+> Accu 2 passed through these values:
 >
-> | when | 0x90 | pushed |
+> | when (local) | 0x90 | pushed |
 > |---|---|---|
 > | until 2026-07-29 18:46 | `00 00 00 02` | — |
 > | 2026-07-29 18:46:31 | `00 00 02 0D` | `0D` |
 > | 2026-07-29 19:26:27 | `00 02 0D 02` | `02` |
-> | by 2026-08-01, still on 08-03 | `0D 02 0C 02` | `0C`, `02` |
+> | 2026-07-31 17:52:32 | `02 0D 02 0C` | `0C` |
+> | 2026-07-31 19:56:50 | `0D 02 0C 02` | `02` |
+> | 2026-08-03 15:55:03 | `02 0C 02 0D` | `0D` |
+> | 2026-08-03 16:16:48 | `0C 02 0D 02` | `02` |
 >
 > **Every state is the previous one shifted left by one byte, with a new byte entering at
-> `d3`.** The two transitions on 07-29 were each recorded as a state change, so those two
-> shifts are observed directly; the last two are inferred from the endpoint, because the
-> capture task was blind from 07-29 17:13 to 08-03 (see below) and the recorder keeps only
-> transitions of this register, not a trace.
+> `d3`.** All six transitions are observed directly in Home Assistant history. This matters:
+> the capture task was blind from 07-29 17:13 to 08-03 (see below), and the two pushes of
+> 07-31 fall inside that gap — the hourly captures would have shown only the endpoint and
+> left the middle to be guessed. **The captures found the register; HA dated it.**
 >
 > This explains everything that was odd about 0x90 at once:
 >
@@ -278,14 +281,40 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > attribution never used 0x90 as an input, only as one of six per-pack constants in the
 > 143-frame cross-check, and that check would now be run without it.
 >
-> What the bytes mean is open. They look like two-byte records: accu 2 pushed `(0D, 02)` and
-> then `(0C, 02)`, and the 4.x register held `(01, 0E)` twice. If the second byte of each
-> pair is a fixed tag, the payload bytes are `0D` and `0C` — 13 and 12, one apart and
-> descending, which is suggestive and nothing more on two samples. Neither push coincided
-> with anything visible: the 18:46 and 19:26 events on 07-29 fall in an ordinary evening
-> discharge, with no step in current, voltage, temperature or solar output at either moment.
-> An event log that fires roughly twice a week and leaves four bytes of history is going to
-> take a while.
+> **The pushes come in pairs, and the second of each pair is always `02`.** Six pushes in six
+> days, and they group without ambiguity:
+>
+> | pair | opening push | closing push | gap |
+> |---|---|---|---|
+> | 07-29 | `0D` at 18:46 | `02` at 19:26 | 40 min |
+> | 07-31 | `0C` at 17:52 | `02` at 19:56 | 124 min |
+> | 08-03 | `0D` at 15:55 | `02` at 16:16 | 21 min |
+>
+> That is the shape of an **event log**: a code is pushed when something starts and `02` is
+> pushed when it ends, `02` meaning "back to normal". It also finally explains the pre-update
+> `01 0E 01 0E` as two complete `(0E, 01)` pairs, and the post-reset `00 00 00 02` on accu 2
+> and `00 00 00 01` on accu 1 as a single closing push whose value differs per pack — so the
+> "normal" code is `02` on accu 2 and `01` on accu 1, and `d3` matching the slot really was
+> the coincidence it was called above.
+>
+> **0xF2 moved eight seconds before one of them.** Accu 2's 0xF2 `d1` normally toggles between
+> `00` and `02` over days, but on 2026-07-31 it read `1A` at 17:52:24, the `0C` was pushed
+> into 0x90 at 17:52:32, and 0xF2 fell back to `02` at 17:52:37 — a thirteen-second excursion
+> caught by chance between two one-minute samples. So 0xF2 looks like the *live* status word
+> and 0x90 the log of it, sharing a code space in which `02` is the idle code. The logged
+> byte was `0C` and not the `1A` that was on the wire, so the mapping between them is not
+> identity; with one sample it is not anything yet.
+>
+> **What is ruled out.** No push coincides with anything visible on the bus. The 08-03 pair
+> falls inside a flat float plateau: engine off (starter battery 12.67 V, unmoving), packs at
+> 100 % SoC, current oscillating ±1 A as the two packs trade with each other, no step in
+> voltage, temperature, charge stage or solar output at either moment. The same was true of
+> the 07-29 pair. Whatever these record is internal to the pack and does not show up in any
+> quantity being logged — which is the useful part of the negative result.
+>
+> Note also that only **accu 2** logs anything. Accu 1 has pushed nothing in six days and
+> still reads `00 00 00 01`. Two nominally identical packs, one of which keeps having events
+> and one of which does not, is worth watching on its own.
 
 > **Correction: 0x14 and 0x0C are temperature, not state of charge and not an accumulator.**
 > Both SoC readings were written down while the two packs were still being averaged into a
@@ -586,18 +615,19 @@ the other.
 | 0x02 | `Vh Vl Ih Il` | charge voltage + solar charge current | V=0.01 V; I=0.01 A | CONFIRMED |
 | 0x01 | `Vh Vl` | starter-battery voltage | 0.01 V | CONFIRMED |
 | 0x1B | `Vh Vl (FF FF)` | panel/input voltage. **The dark test has now run itself**: it sits at 0x000A = 0.10 V all night and steps to 13.28 V within one capture of first light, then 14.86 → 21.99 V as the sun climbs | 0.01 V (0.10 V dark, 13.5–24.5 V lit) | CONFIRMED (dark test) |
-| 0x1C | `xh xl (FF FF)` | flickers 0/1/2/5 with no correlation to charge current | ? | UNRESOLVED |
+| 0x1C | `xh xl (FF FF)` | flickers 0/1/2/5 with no correlation to charge current. It is **not** always moving: it held a flat `0000` through the 13:13, 14:14 and 15:13 captures of 2026-08-03 and only started stepping 0/1/2 again at 16:13, as the low sun made 0x1B's MPPT sweep erratic. So it moves when the input is unsteady, which fits a sweep or restart counter better than a measurement | ? | UNRESOLVED (moves with input instability) |
 | 0x35 | `Eh El 00 00` | cumulative energy produced — rose 178 → 183 and **only while the panel was delivering**, mirroring the battery's 0x35 layout | ~1 Wh/count | LIKELY |
 | 0x11 | `xh xl (FF FF)` | **charger temperature** as `(°C + 50) × 10`, in consecutive counts, so the full 0.1 °C. Correlates **+0.96 with its own output current** and −0.52 with the packs: 17.0 °C at dawn to 51.0 °C at 5.1 A five hours later, while the packs moved one degree. The lag that looked like filtering or accumulation is a heatsink. Same encoding as the packs' 0x0C | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0x0B | `b0` | 78 — same layout as the battery's SoC register, but the battery reported 56 % at the same moment | % | UNCERTAIN |
 | 0x54 | `01 41 43 44` | serial prefix, three ASCII characters in `d1..d3` ("ACD") | text | CONFIRMED (app + label) |
 | 0x55 | `00 ** ** **` | serial number, 24-bit big-endian in `d1..d3` (= 2****99) | — | CONFIRMED (app + label) |
-| 0x60 | `42 s 0D 00` | `d2` = bus address (13; was 9 before the update). **`d1` is not identity** — it is 3 by day and 0 by night, switching with 0x26 `d3` (see below) | — | CONFIRMED (app) for `d2`; `d1` = charger state |
+| 0x60 | `42 s 0D 00` | `d2` = bus address (13; was 9 before the update). **`d1` is not identity — it is the charge stage**: 0 = off, 3 = bulk, 4 = absorption, 6 = float. Always equal to 0x26 `d3` (see below) | — | CONFIRMED (app) for `d2`; CONFIRMED (charge stage) for `d1` |
 | 0xA0 | `01 01 00 05` | `d1` = IAD, `d2 d3` = model number (1 / 0005) | — | CONFIRMED (app) |
 | 0xA1 | `05 04 03 04` | firmware version `d0`.`d1` = 5.4 | — | CONFIRMED (app) |
-| 0x26 | `01 00 05 s` | **not constant** — `d3` is 3 by day and 0 by night, moving in the same capture as 0x60 `d1` | — | LIKELY (charger state) |
+| 0x26 | `01 00 05 s` | **not constant** — `d3` is the **charge stage**: 0 = off, 3 = bulk, 4 = absorption, 6 = float. Byte-for-byte identical to 0x60 `d1` in every capture. `d0 d1 d2` = `01 00 05` repeat 0xA0's model number | — | CONFIRMED (charge stage) |
 | 0xD0 | constant | `00 20 00 00` | — | UNRESOLVED |
-| 0x0C / 0xC0 / 0xE0 / 0xF0 / 0xF1 | `FF FF FF FF` or all zero | never move; candidate unsupported-parameter and alarm/fault slots | — | UNRESOLVED |
+| 0x0C / 0xC0 / 0xF0 / 0xF1 | `FF FF FF FF` or all zero | never move; candidate unsupported-parameter and alarm/fault slots | — | UNRESOLVED |
+| 0xE0 | `00 00 00 01` | **moved once**: `00 00 00 00` → `00 00 00 01` somewhere in the five-day capture blackout of 07-29 → 08-03, and has held 1 since. Not temperature (it was 0 at 67.7 °C on 07-29) and not the charge stage (0 during float on 07-29). It is not published to MQTT, so the transition has no timestamp — which is exactly why it now will be | — | UNRESOLVED (one transition, cause unknown) |
 
 > **Why 0x1B is read as panel voltage.** It looks like noise at first — 187 distinct values
 > in 222 samples, swinging 13.5–24.5 V from one frame to the next. But the sequence is not
@@ -607,24 +637,62 @@ the other.
 > was to cover the panel and check the value collapses; **nightfall performed it**, and it
 > collapses to 0.10 V.
 
-> **The charger has a day/night state, and two registers carry it.** On 2026-07-28 the
-> 05:13 capture shows 0x26 = `01 00 05 00` and 0x60 = `42 00 0D 00`; the 06:13 capture shows
-> `01 00 05 03` and `42 03 0D 00`, and they have held 3 all day. The same capture is the one
-> where 0x1B leaves 0.10 V and charge current first becomes non-zero, so the trigger is
-> input from the panel rather than a clock.
+> **0x26 `d3` and 0x60 `d1` are the charge stage.** They were first written down as
+> constants, then as a day/night flag; a week of hourly captures plus the matching voltage
+> curve in Home Assistant settles them. The two bytes are byte-for-byte equal in every
+> capture taken so far, so they are one quantity published twice.
 >
-> Both registers were previously written down as constants, because every capture used to
-> characterise them was taken by day. `01 00 05 03` and `42 03 0D 00` are in this document as
-> fixed values for exactly that reason — a reminder that "constant across all captures" is
-> only as strong as the diversity of the captures, and that hourly sampling around the clock
-> is what exposed it. The charger's 0x60 `d1` is the more consequential of the two: 0x60 is
-> the bus-address register and its other bytes really are identity, so `d1` was assumed to be
-> as well.
+> | stage | output voltage | current | panel | what it is |
+> |---|---|---|---|---|
+> | **0** | 13.27 V (resting battery) | 0 A | 0.10 V | off — no input |
+> | **3** | 13.3–13.8 V (follows the battery) | up to 8.6 A, input-limited | delivering | **bulk** — constant current, the charger takes what the panel gives |
+> | **4** | **14.35 V regulated** | tapers away (4.49 → 1.21 A) | delivering | **absorption** — constant voltage at the LiFePO₄ absorption setpoint |
+> | **6** | **13.76 V regulated** | small | delivering | **float** — constant voltage at the maintenance setpoint |
 >
-> What the value 3 *means* is open. It is not a simple boolean, or it would be 1. A bulk /
-> absorption / float stage number is the obvious guess, and it predicts that `d1` takes other
-> values later in a full charge — which is checkable at no cost from the same hourly captures
-> on a day that reaches absorption.
+> The stage is not read off the voltage — it is read off the register, and the voltage is
+> what confirms it. On 2026-08-03 the packs sat on a flat 14.34–14.38 V plateau from 12:24 to
+> 13:25 with charge current falling 4.49 → 1.21 A, and the 12:47 and 13:13 captures inside
+> that window both read `04`. The plateau then dropped to a second flat shelf at 13.75–13.77 V,
+> and the 14:14, 15:13 and 16:13 captures all read `06`. Two regulated plateaus at two
+> different setpoints, each with its own register value, is the signature of absorption
+> followed by float; a voltage that merely follows the battery, as at stage 3, is not.
+>
+> The cross-check runs the other way too, over every capture on four days, with no exception:
+>
+> - **07-28** never exceeded 14.11 V — no absorption plateau — and every capture that day
+>   reads `03` or `00`. A stage-4 reading on that day would have falsified this.
+> - **07-29** held an absorption plateau 14:51–15:51. The 13:13 capture reads `03` (before),
+>   the 16:13 capture reads `06` (after). The sampling is hourly, so it stepped over the `04`
+>   window itself — the values on either side are still the right ones.
+> - **08-03** as above: `04` inside the plateau, `06` after it.
+> - Every capture taken in the dark reads `00`.
+>
+> **The numbering is probably not NDS's own.** Victron's VE.Direct charge-state enum reads
+> 0 off, 1 low power, 2 fault, 3 bulk, 4 absorption, 5 float, 6 storage, 7 equalise. The
+> three values whose meaning is pinned by the voltage plateaus — 0, 3 and 4 — match it
+> exactly, which is more agreement than coincidence comfortably explains on a bus this
+> obscure. That is a useful hypothesis rather than a result, and it makes two predictions
+> worth writing down before they can be fitted after the fact:
+>
+> - The unseen values 1, 2 and 5 are **low power, fault and float** — the ones a healthy
+>   installation on a single panel would not produce. A fault would eventually show up as 2.
+> - **6 is storage, not float.** The label above is the observed behaviour (a regulated
+>   13.76 V maintenance shelf) and storage is what a LiFePO₄ profile calls that shelf; a
+>   separate 5 would then be a distinct, higher float the charger simply never uses here.
+>
+> This is checkable without waiting: the van already has a **second** charger, the Victron
+> Orion XS, whose charge state Home Assistant reads over BLE (see the cross-source section
+> below). Both drive the same bank, so a day on which the Orion reports float while the NDS
+> reports 6 — or 5 — would settle which of the two labels is right, at no cost beyond
+> looking. Until then the entity publishes the number as well as the word, so a relabel
+> later does not invalidate the history.
+>
+> **What this replaces.** "3 by day and 0 by night" was right about the observations and
+> wrong about the cause — the trigger is not daylight but the charger having input to work
+> with, and `d1`/`d3` count charge stages rather than a day/night flag. It is the same lesson
+> as before, one step further along: "constant across all captures" was only as strong as the
+> diversity of the captures, and "boolean across all captures" was only as strong as the
+> diversity of the *charge cycles*. It took a day that actually reached absorption.
 
 ## Verification (capture 4/5/6 vs app)
 
@@ -741,21 +809,20 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   deeper in the cell stack look identical from the bus. A fast *electrical* transient with no
   thermal content — a big load step at constant ambient — would separate them, since a filter
   would still lag and a buried sensor would have nothing to lag behind.
-- **What the charger's state nibble counts.** 0x26 `d3` and 0x60 `d1` move together and were
-  3 whenever the panel delivered and 0 when it did not. They have since also been seen at
-  **6** (2026-07-29 late afternoon) and **4** (2026-08-03 midday), so the day/night reading
-  was the two values a short window happened to contain. A bulk/absorption/float stage number
-  is still the obvious guess; four distinct values is enough that the next step is to line
-  the nibble up against charge current and voltage over a full week rather than guess.
-- **What 0x90's bytes record.** The shift structure is settled (see the correction above);
-  the payload is not. Accu 2 has pushed `(0D, 02)` and `(0C, 02)`, accu 1 nothing at all in a
-  week. Two things would crack it cheaply: a push that coincides with something visible, and
-  a push on accu 1, which would say whether the recurring `02` is accu 2's own tag. Both need
-  patience rather than setup — but the register must be logged as raw bytes with timestamps,
-  because it is the transitions that carry the information and a snapshot every hour throws
-  away which byte moved.
-  Note also that an earlier capture read 1 and **0**, which the index hypothesis does not
-  yet account for.
+- ~~What the charger's state nibble counts.~~ **Answered on 2026-08-03** — 0x26 `d3` and
+  0x60 `d1` are the charge stage: 0 off, 3 bulk, 4 absorption at 14.35 V, 6 float at 13.76 V.
+  Lining the nibble up against voltage and current over a week was indeed what did it. What
+  remains is only the unseen values 1, 2 and 5, which this installation may never produce.
+- **What 0x90's bytes record.** The shift structure and the pairing are settled (see the
+  correction above); the payload is not. Accu 2 has logged three `(0C|0D, 02)` pairs in six
+  days and accu 1 nothing at all, and no push lines up with anything visible on the bus. Two
+  things would still crack it cheaply: **a push on accu 1**, which would say whether the
+  recurring `02` is accu 2's own tag rather than a shared idle code, and **a second 0xF2
+  excursion** caught with its 0x90 push, which would turn the one-sample `1A → 0C` mapping
+  into a relation. The second is now much likelier to be caught, because 0xF2 is already
+  published per pack and its excursion on 07-31 lasted only thirteen seconds — a register
+  sampled hourly would never have seen it. That is the general rule this week keeps
+  demonstrating: **the captures find registers, Home Assistant times them.**
 - Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
   coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
