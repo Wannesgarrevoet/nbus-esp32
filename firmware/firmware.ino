@@ -522,7 +522,13 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   String topic = String(NBUS_HA_PREFIX) + "/sensor/" + NBUS_DEVICE_ID + "_" + key + "/config";
   String payload;
   serializeJson(doc, payload);
-  mqtt.publish(topic.c_str(), payload.c_str(), true);
+  // A discovery message that does not fit the MQTT buffer is dropped without an error, and
+  // the only symptom is an entity that never appears — which looks exactly like a register
+  // that never answered. Say so on the serial console instead.
+  if (!mqtt.publish(topic.c_str(), payload.c_str(), true)) {
+    Serial.printf("[mqtt] discovery for %s FAILED (%u byte topic + %u byte payload)\n",
+                  key, topic.length(), payload.length());
+  }
 }
 
 // Discovery for a hand-picked set of registers the parser does not decode.
@@ -597,6 +603,49 @@ const RegSensor kRegSensors[] = {
   // Both move, neither follows anything instantaneous; 0x11 lags the output badly.
   { "reg_81_11", 0x81, 0x11, "0x11 value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
   { "reg_81_1c", 0x81, 0x1C, "0x1C value", "{{ value[0:4] | int(base=16) }}", "", "measurement" },
+
+  // The charge stage: 0 off, 3 bulk, 4 absorption, 6 float. This is the one entry in this
+  // table that gets a real name instead of its address, because for once the meaning is
+  // established rather than suspected — two regulated voltage plateaus at 14.35 V and
+  // 13.76 V, each with its own value, cross-checked against every capture on four days.
+  // See the protocol map. Named honestly is not the same as named cautiously.
+  //
+  // Both a number and a word. The number carries state_class, so Home Assistant keeps an
+  // hourly min/max of it forever and a stage that lasts ten minutes survives in that
+  // hour's extremes long after the recorder has dropped the detail; the word is what you
+  // actually want to read on a dashboard. An unseen value prints as "unknown (5)" rather
+  // than being silently mapped to something plausible — values 1, 2 and 5 have never been
+  // observed, and the first time one appears it must be obvious that it is new.
+  //
+  // 6 is labelled float because that is what it does — a regulated 13.76 V maintenance
+  // shelf. If the numbering really is Victron's, 6 is "storage" and 5 is float; the number
+  // is published alongside the word for exactly that reason, so a relabel costs a template
+  // and not a year of history.
+  { "reg_81_26_stage", 0x81, 0x26, "Charge stage",
+    "{{ value[6:8] | int(base=16) }}", "", "measurement" },
+  { "reg_81_26_text", 0x81, 0x26, "Charge stage text",
+    "{% set s = value[6:8] | int(base=16) %}"
+    "{{ {0: 'off', 3: 'bulk', 4: 'absorption', 6: 'float'}.get(s, 'unknown (' ~ s ~ ')') }}",
+    "", "" },
+
+  // 0x60 d1 carries the same stage and is published too — see publishSolarDiscovery, not
+  // this table. It cannot live here: 0x60 is an identity register, the parser decodes it,
+  // and this table only reaches registers the parser rejects.
+
+  // Panel/input voltage, confirmed by nightfall performing the dark test on its own: 0.10 V
+  // in the dark, 13.5-24.5 V lit. The mirror's ten-second throttle means this is a sample of
+  // an MPPT sweep and not a smooth curve — individual values bounce across several volts
+  // between the sweep's endpoints, and it is the daily envelope that carries the meaning,
+  // not any one reading.
+  { "reg_81_1b", 0x81, 0x1B, "Panel voltage",
+    "{{ (value[0:4] | int(base=16) / 100) | round(2) }}", "V", "measurement" },
+
+  // 0xE0 went 0 -> 1 during the five-day blackout when this laptop could not reach the ESP,
+  // and nothing recorded when. The ESP itself never stopped and was publishing to MQTT the
+  // whole time — had this register had an entity then, the transition would have a timestamp
+  // and probably an explanation. It is here for the next one.
+  { "reg_81_e0", 0x81, 0xE0, "0xE0 raw", "", "", "" },
+  { "reg_81_e0_n", 0x81, 0xE0, "0xE0 value", "{{ value | int(base=16) }}", "", "measurement" },
 };
 
 // Register-mirror topics name the device, not the NAD. Both packs answer on 0x85, so a
@@ -689,6 +738,14 @@ void publishSolarDiscovery() {
   publishDiscoverySensor((sfx + "_address").c_str(), "Bus address", st.c_str(),
                          "{{ value_json.address }}", "", "", "",
                          sfx, name, "NDS MPPT", sw);
+  // The charge stage from 0x60 d1. The register mirror publishes the same quantity from
+  // 0x26 d3 as "Charge stage", and this second entity exists precisely so the two can be
+  // compared: they have been byte-for-byte equal in every capture so far, but "equal in
+  // every capture so far" holds only for as long as something keeps checking. If these
+  // ever diverge, the reading in the protocol map is wrong and the history will say when.
+  publishDiscoverySensor((sfx + "_stage60").c_str(), "Charge stage (0x60)", st.c_str(),
+                         "{{ value_json.stage }}", "", "", "measurement",
+                         sfx, name, "NDS MPPT", sw);
   publishRegDiscovery(NBusCycleTracker::kSolarSlot, sfx, name, "NDS MPPT", sw);
 }
 
@@ -738,7 +795,14 @@ void publishDiscovery() {
 bool mqttConnect() {
   if (cfg.host.isEmpty()) return false;
   mqtt.setServer(cfg.host.c_str(), cfg.port);
-  mqtt.setBufferSize(512);
+  // Sized for the largest discovery payload, not for the state messages — discovery is far
+  // bigger, because every entity repeats the whole device block. The charge-stage entity
+  // with its stage-name template is currently the longest at about 420 bytes of JSON plus a
+  // 65-byte topic, which cleared the old 512 by twenty-odd bytes. PubSubClient truncates
+  // nothing and warns about nothing: publish() simply returns false, and the entity would
+  // have gone quietly missing from Home Assistant. Hence the headroom, and hence the check
+  // in publishDiscoverySensor.
+  mqtt.setBufferSize(1024);
 
   String clientId = String(NBUS_DEVICE_ID) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
   const char* user = cfg.user.isEmpty() ? nullptr : cfg.user.c_str();
@@ -808,6 +872,7 @@ void publishState() {
     JsonDocument doc;
     doc["voltage"] = roundf(s.solar.voltage * 100) / 100.0;
     doc["current"] = roundf(s.solar.current * 100) / 100.0;
+    if (s.solar.stage_valid) doc["stage"] = s.solar.stage;
     if (s.solar.id.address_valid) doc["address"] = s.solar.id.address;
     if (s.solar.id.serialValid()) doc["serial"] = s.solar.id.serial;
     String payload; serializeJson(doc, payload);

@@ -100,6 +100,44 @@ int main() {
     check_near("v6 starter_voltage", p.state().solar.starter_voltage, 12.71f);
   }
 
+  // --- Vector 6b: the charger's 0x60 carries two things at once ---
+  // d2 is the bus address, which decodeIdentity claims, and d1 is the charge stage, which
+  // it does not. The frame has to satisfy both readers; this is the test that says so,
+  // because the obvious refactor — letting decodeIdentity have 0x60 and nothing else — is
+  // silent and leaves the stage permanently at its default of 0.
+  {
+    NBusParser p;
+    const uint8_t bulk[] = {0x81, 0x06, 0xF4, 0x60, 0x42, 0x03, 0x0D, 0x00};
+    check_true("v6b accepted", p.feedResponse(bulk, sizeof bulk));
+    check_true("v6b stage valid", p.state().solar.stage_valid);
+    check_int("v6b stage bulk", p.state().solar.stage, 3);
+    check_int("v6b address still read", p.state().solar.id.address, 13);
+
+    // Absorption, then float, then off: the stage must follow rather than latch.
+    const uint8_t abs_[] = {0x81, 0x06, 0xF4, 0x60, 0x42, 0x04, 0x0D, 0x00};
+    p.feedResponse(abs_, sizeof abs_);
+    check_int("v6b stage absorption", p.state().solar.stage, 4);
+    const uint8_t flt[] = {0x81, 0x06, 0xF4, 0x60, 0x42, 0x06, 0x0D, 0x00};
+    p.feedResponse(flt, sizeof flt);
+    check_int("v6b stage float", p.state().solar.stage, 6);
+    const uint8_t off[] = {0x81, 0x06, 0xF4, 0x60, 0x42, 0x00, 0x0D, 0x00};
+    p.feedResponse(off, sizeof off);
+    check_int("v6b stage off", p.state().solar.stage, 0);
+    check_true("v6b still valid at zero", p.state().solar.stage_valid);
+  }
+
+  // --- Vector 6c: a pack's 0x60 must not set a charge stage ---
+  // Only the charger puts a stage in d1; on the packs that byte is a flat zero and the
+  // register is identity all the way through. Reading it there would invent a stage for a
+  // device that has none, so the battery path must leave stage_valid alone.
+  {
+    NBusParser p;
+    const uint8_t pack[] = {0x85, 0x06, 0xF4, 0x60, 0x40, 0x00, 0x0B, 0x00};
+    check_true("v6c accepted", p.feedResponse(pack, sizeof pack));
+    check_int("v6c pack address", p.state().batt[0].id.address, 11);
+    check_true("v6c no solar stage", !p.state().solar.stage_valid);
+  }
+
   // --- Vector 7: cell voltages (reg 0x56 -> cells 1,2) ---
   {
     NBusParser p;

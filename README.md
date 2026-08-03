@@ -27,6 +27,8 @@ TLB150 batteries and an MPPT solar charger. See [`docs/NBUS_protocol_map.md`](do
   **not yet verified on our own bus**
 - Reads out device identity: serial number, model, bus address and firmware version per
   node, all cross-checked against the Dometic Power app
+- Solar charger: charge stage (off / bulk / absorption / float), panel voltage and starter-
+  battery voltage alongside output voltage and current
 - Home Assistant MQTT auto-discovery (sensors appear automatically)
 - Republishes registers it cannot decode as raw hex — `<base>/reg/85_<N>/<REG>` per pack,
   `<base>/reg/81/<REG>` for the charger — and gives a hand-picked few of them their own

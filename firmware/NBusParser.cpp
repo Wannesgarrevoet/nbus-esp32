@@ -176,6 +176,15 @@ bool NBusParser::decodeBattery(uint8_t reg, const uint8_t* d, int slot) {
 bool NBusParser::decodeSolar(uint8_t reg, const uint8_t* d) {
   NBusSolar& s = state_.solar;
 
+  // 0x60 belongs to decodeIdentity — d2 really is the bus address — but on the charger d1
+  // is not identity at all: it is the charge stage. Read it here first, so the register can
+  // be both, and let decodeIdentity have the frame afterwards. The packs' 0x60 d1 is a flat
+  // zero and is deliberately not read this way; only the charger puts a stage there.
+  if (reg == 0x60) {
+    s.stage = d[1];
+    s.stage_valid = true;
+  }
+
   if (decodeIdentity(s.id, reg, d, nullptr)) return true;
 
   switch (reg) {

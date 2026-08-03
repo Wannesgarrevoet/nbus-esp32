@@ -72,6 +72,13 @@ struct NBusSolar {
   float voltage = 0.0f; bool valid = false;            // shared valid for V+I
   float current = 0.0f;
   float starter_voltage = 0.0f; bool starter_valid = false;
+
+  // The charge stage as carried by 0x60 d1: 0 off, 3 bulk, 4 absorption, 6 float. The same
+  // value sits in 0x26 d3, which the parser leaves to the register mirror. This copy has to
+  // be decoded here instead, because 0x60 is an identity register and the mirror only ever
+  // sees registers the parser rejects — mirroring it was tried first and would have left a
+  // permanently unavailable entity.
+  uint8_t stage = 0; bool stage_valid = false;
 };
 
 // Decoded snapshot of the whole bus.
