@@ -297,18 +297,32 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > "normal" code is `02` on accu 2 and `01` on accu 1, and `d3` matching the slot really was
 > the coincidence it was called above.
 >
-> **0xF2 moved eight seconds before one of them.** Accu 2's 0xF2 `d1` normally toggles between
-> `00` and `02` over days, but on 2026-07-31 it read `1A` at 17:52:24, the `0C` was pushed
-> into 0x90 at 17:52:32, and 0xF2 fell back to `02` at 17:52:37 — a thirteen-second excursion
-> caught by chance between two one-minute samples. So 0xF2 looks like the *live* status word
-> and 0x90 the log of it, sharing a code space in which `02` is the idle code. The logged
-> byte was `0C` and not the `1A` that was on the wire, so the mapping between them is not
-> identity; with one sample it is not anything yet.
+> **0xF2 moved eight seconds before one of them — but only that once.** Accu 2's 0xF2 `d1`
+> normally toggles between `00` and `02` over days, but on 2026-07-31 it read `1A` at 17:52:24,
+> the `0C` was pushed into 0x90 at 17:52:32, and 0xF2 fell back to `02` at 17:52:37 — a
+> thirteen-second excursion caught by chance between two one-minute samples. The obvious
+> reading was that 0xF2 is the *live* status word and 0x90 the log of it, sharing a code space
+> in which `02` is the idle code. The logged byte was `0C` and not the `1A` that was on the
+> wire, so the mapping between them was never identity; with one sample it was not anything yet.
+>
+> **Two further observations show that reading does not generalise, and they cut in opposite
+> directions.** Accu 2's pair of 08-03 was pushed while its own 0xF2 sat at `00 00 00 00`
+> throughout — unchanged since 08-02 13:05:37, and still unchanged at 23:25 that evening. A
+> complete open-and-close event was therefore logged with no movement in 0xF2 at all, and not
+> even from the `02` that was supposed to be the idle code. Conversely accu 1 spent 16:20:40 to
+> 17:09:44 on 08-03 with its 0xF2 at `02` — a 49-minute excursion, far longer than the one that
+> did coincide with a push — and logged nothing whatever; its 0x90 still reads `00 00 00 01`.
+>
+> What survives is narrower and more useful than what it replaces: the routine `00`/`02`
+> toggling of 0xF2 is **independent of 0x90 in both directions**. 0xF2 is not the live word
+> behind the log. The only association left standing is with the anomalous `1A`, which remains
+> a single sample — so if there is a relation, it is to unusual values in 0xF2 and not to the
+> register as such.
 >
 > **What is ruled out.** No push coincides with anything visible on the bus. The 08-03 pair
 > falls inside a flat float plateau: engine off (starter battery 12.67 V, unmoving), packs at
 > 100 % SoC, current oscillating ±1 A as the two packs trade with each other, no step in
-> voltage, temperature, charge stage or solar output at either moment. The same was true of
+> voltage, temperature, charge stage, solar output or 0xF2 at either moment. The same was true of
 > the 07-29 pair. Whatever these record is internal to the pack and does not show up in any
 > quantity being logged — which is the useful part of the negative result.
 >
@@ -636,6 +650,15 @@ the other.
 > exactly between battery voltage and a 12 V panel's open-circuit voltage. The decisive test
 > was to cover the panel and check the value collapses; **nightfall performed it**, and it
 > collapses to 0.10 V.
+>
+> The collapse has since been watched at ten-second resolution instead of inferred from two
+> hourly captures either side of it. On 2026-08-03 the charger shut down at 21:29:27 (stage
+> 3 → 0) and released the panel; 0x1B then fell 13.29 → 12.02 → 10.16 → 8.25 V over the next
+> six minutes and reached 0.02 V, while the battery voltage it had been sitting on top of
+> stayed flat at 13.3 V. A smooth dusk curve that detaches from the battery at the exact
+> moment another register says the charger stopped is not something a mis-scaled or
+> misattributed value produces. It is also the first thing the newly published entities bought
+> that the captures could not have: the entire decay happens between two of them.
 
 > **0x26 `d3` and 0x60 `d1` are the charge stage.** They were first written down as
 > constants, then as a day/night flag; a week of hourly captures plus the matching voltage
@@ -666,6 +689,20 @@ the other.
 >   window itself — the values on either side are still the right ones.
 > - **08-03** as above: `04` inside the plateau, `06` after it.
 > - Every capture taken in the dark reads `00`.
+>
+> **Nor is it read off the current.** On 2026-08-03 the charge current reached 0.00 A at
+> 20:36:56 and stayed there, and the stage held `03` for a further 53 minutes before dropping
+> to `00` at 21:29:27. A charger reporting a state derived from its own telemetry would have
+> left bulk when the current did; this one stays in its mode until it decides to shut down.
+> That is the whole argument for reading the register rather than inferring the stage from
+> quantities that were already published.
+>
+> The same shutdown gave the first **live** check that the two bytes are one quantity. Until
+> then their equality rested on captures, which read both bytes from the same frame window and
+> so cannot catch them disagreeing in time. At the transition 0x26 `d3` published `0` at
+> 21:29:27 and 0x60 `d1` published `0` at 21:29:34; the seven seconds are the two publication
+> paths — 0x26 through the register mirror, 0x60 through the solar JSON — and not a
+> disagreement between the bytes.
 >
 > **The numbering is probably not NDS's own.** Victron's VE.Direct charge-state enum reads
 > 0 off, 1 low power, 2 fault, 3 bulk, 4 absorption, 5 float, 6 storage, 7 equalise. The
@@ -794,10 +831,13 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   and **the sunrise of 2026-07-28 refuted it**: 0xF2 held `00 02 00 00` on both packs through
   every hourly capture from 00:13 to 10:13, across first light at 06:13 and across charge
   current climbing from 0 to 5.1 A. Nothing charge-related stays still through that. The
-  reading now is that 2 is the resting value for a healthy pack and the 20:07 transition was
-  pack 2 settling into it late — which puts 0xF2 back alongside 0xC0 / 0xF0 / 0xF1 as a
-  register that needs a fault to reveal itself, with the difference that its healthy value is
-  2 rather than 0.
+  follow-up reading — that 2 is *the* resting value for a healthy pack — has not held either:
+  a week of per-pack history has both packs wandering between `00` and `02` on their own
+  schedules, and on the evening of 08-03 both rest at `00`, accu 2 having sat there since
+  08-02 13:05. So neither value is the healthy one; the register simply has two states it
+  moves between for reasons nothing else on the bus reveals. What it is *not* is a charge
+  state, a fault flag with an obvious trigger, or — see the 0x90 correction above — the live
+  word behind the event log.
 - ~~Whether the temperature reading survives a real swing.~~ **Answered on 2026-07-28** — the
   packs reversed at 08:00–09:00 in step with the IBS meter while the charger ran away to
   51 °C on its own current. See *The 2026-07-28 morning settles it* above. The afternoon
@@ -818,11 +858,13 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   days and accu 1 nothing at all, and no push lines up with anything visible on the bus. Two
   things would still crack it cheaply: **a push on accu 1**, which would say whether the
   recurring `02` is accu 2's own tag rather than a shared idle code, and **a second 0xF2
-  excursion** caught with its 0x90 push, which would turn the one-sample `1A → 0C` mapping
-  into a relation. The second is now much likelier to be caught, because 0xF2 is already
-  published per pack and its excursion on 07-31 lasted only thirteen seconds — a register
-  sampled hourly would never have seen it. That is the general rule this week keeps
-  demonstrating: **the captures find registers, Home Assistant times them.**
+  excursion to an unusual value** caught with its 0x90 push. The second test has narrowed
+  since it was written: ordinary `00`/`02` movement in 0xF2 is now known to be unrelated to
+  0x90 in both directions, so only a repeat of something like the `1A` of 07-31 would turn
+  that one-sample mapping into a relation. Such an excursion lasted thirteen seconds, which is
+  why it is worth having it published continuously — a register sampled hourly would never
+  have seen it. That is the general rule this week keeps demonstrating: **the captures find
+  registers, Home Assistant times them.**
 - Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
   coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
 - Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
