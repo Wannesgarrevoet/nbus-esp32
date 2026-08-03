@@ -103,6 +103,8 @@ So a run of 4 is two cycles with nothing missing from either, and position modul
 length attributes it correctly. The check that this is sound: inside the merged runs of one
 capture, 143 frames carried a register whose value is fixed per pack (0x54, 0x55, 0x60,
 0x90, 0xA0, 0xA1), and **all 143 landed on the pack that value belongs to, none wrong.**
+(0x90 is now known to shift over days rather than being fixed. It is still constant across a
+single five-minute capture, so the check stands as run, but a repeat should drop it.)
 Replaying the captures with the change drops the discard rate from ~12 % to ~0.5 %, and on
 the live bus from ~11 % to ~0.1 %, while the one-serial-per-slot assertion still holds.
 
@@ -214,7 +216,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three temperatures as `°C + 50`, one byte each, whole degrees, and **three physically separate sensors** — they spread to 2 °C in a fixed order under a 50 A charge. Responds fast; this is the register to use for live pack temperature. `d3 = 0x0A` is constant and is probably the scale factor 10 that turns them into 0x0C's units. **Not state of charge** — see the correction below | °C | CONFIRMED (independent sensor) |
-| 0x90 | `01 0E 01 0E` on 4.x; `00 00 00 n` on 5.1 | **not a constant and not a temperature** — see the correction below. On 5.1 the first three bytes are zero and `d3` is a small per-pack number that matches the pack's **position in the poll cycle**: 1 on slot 1 and 2 on slot 2, in every one of 1364 consecutive complete cycles, without an exception. An earlier capture read 1 and 0, so the numbering is not fixed for all time | — | LIKELY for `d3` = poll-cycle index; `d0..d2` UNRESOLVED |
+| 0x90 | `0D 02 0C 02` on accu 2; `00 00 00 01` on accu 1 | **a four-byte shift register**, newest byte at `d3`, cleared by the 5.1 firmware update and refilling since — two shifts observed directly in HA history. Not a constant, not a temperature, and **not the poll-cycle index**: `d3` matched the slot only while one byte had been pushed. Pushes are rare, roughly twice a week, and their meaning is unknown. See the correction below | — | CONFIRMED (shift structure); byte meaning UNRESOLVED |
 | 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`: **pack temperature** as `(°C + 50) × 10`, so 730 = 23 °C. Always an exact multiple of ten because the pack measures whole degrees; it dithers when a sensor sits on a degree boundary. **Lagged** — a first-order response with a time constant of about 3 hours. Unity gain, so it is right once things settle, but it trails badly during a change; prefer 0x14 for a live reading. Neither an SoC reading nor a counter — see the corrections below | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `00 02 00 00` on both accus since 2026-07-27 20:07 | **a state, and no longer one that tells the packs apart.** Accu 1 has read 2 in every capture, including when it was alone on the bus. Accu 2 read 0 for months, went to 2 for ~2 minutes right after its own firmware update, fell back, and then went to 2 again on 2026-07-27 at 20:07 local and has stayed there since — so "accu 2 reads 0" is dead. It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. The 20:07 transition is the one to explain; it falls within minutes of the solar charger dropping from 2.1 A to zero | — | UNRESOLVED |
@@ -234,26 +236,56 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > moves is unexplained, not explained.** The confident reading and the correct reading were
 > distinguishable only by data that did not exist yet.
 
-> **`d3` of 0x90 is probably the pack's index in the poll cycle.** A live capture of 4096
-> frames on 2026-07-28 split into 1364 runs, every one of them exactly two frames long, so
-> nothing had to be dropped and nothing was merged. Across it 0x90 read `00 00 00 01` on
-> slot 1 (37 frames) and `00 00 00 02` on slot 2 (36 frames), with no third value anywhere.
-> It sits alongside 0x0B, 0x54, 0x55 and 0x60 as one of five registers that are constant
-> within a pack and differ between packs.
+> **Retracted: `d3` of 0x90 is not the pack's index in the poll cycle. 0x90 is a shift
+> register.** The earlier reading was that `d3` states the split from inside the protocol —
+> a live capture of 4096 frames on 2026-07-28 split into 1364 two-frame runs with 0x90
+> reading `00 00 00 01` on slot 1 and `00 00 00 02` on slot 2, no third value anywhere. It
+> was marked LIKELY, and the test proposed for it was to power a pack down and watch whether
+> `d3` followed the new position. That test was never run. A week of Home Assistant history
+> answered it anyway, and the answer is that the question was wrong.
 >
-> That would make it the first field in the protocol that states the split **from inside**.
-> Everything else here attributes frames from the outside — by counting position between
-> two charger frames — and is checked against the serial, which arrives only once per poll
-> of 0x54 and 0x55. A per-frame index would confirm the same split on every frame.
+> Accu 2 passed through these four values:
 >
-> It is LIKELY rather than CONFIRMED because it is one capture of one bus topology, and
-> because an earlier capture read 1 and **0**, which this reading does not explain. The test
-> that settles it is to power one pack down and back up so the poll order changes: if `d3`
-> follows the new position it is an index the master hands out, and it can be used to
-> *verify* the ordinal split but never to replace it; if it stays with its pack it is a
-> device property, and then it identifies a pack on every single frame. The second outcome
-> is the valuable one, so the test is worth doing deliberately rather than waiting for it to
-> happen by accident.
+> | when | 0x90 | pushed |
+> |---|---|---|
+> | until 2026-07-29 18:46 | `00 00 00 02` | — |
+> | 2026-07-29 18:46:31 | `00 00 02 0D` | `0D` |
+> | 2026-07-29 19:26:27 | `00 02 0D 02` | `02` |
+> | by 2026-08-01, still on 08-03 | `0D 02 0C 02` | `0C`, `02` |
+>
+> **Every state is the previous one shifted left by one byte, with a new byte entering at
+> `d3`.** The two transitions on 07-29 were each recorded as a state change, so those two
+> shifts are observed directly; the last two are inferred from the endpoint, because the
+> capture task was blind from 07-29 17:13 to 08-03 (see below) and the recorder keeps only
+> transitions of this register, not a trace.
+>
+> This explains everything that was odd about 0x90 at once:
+>
+> - **The zeros were not a property, they were an empty register.** The 2026-07-27 firmware
+>   update cleared 0x90 along with the energy counters in 0x35. It has been refilling one
+>   byte at a time ever since, which is why the first three bytes were zero in every capture
+>   taken in the days right after the update.
+> - **`01 0E 01 0E` on 4.x was a full register**, not two 16-bit sensors reading 270. That
+>   reading is now retracted twice over: first as a constant that changed across an update,
+>   and now as a structure that never existed.
+> - **`d3` matched the slot by accident.** It held 1 and 2 because a single byte had been
+>   pushed into each pack since the reset, and those bytes happened to be 1 and 2. Accu 1 has
+>   pushed nothing at all in the week since and still reads `00 00 00 01`; accu 2's `d3` is
+>   still `02`, but only because every second byte it pushes happens to be `02`.
+>
+> **So 0x90 cannot be used to verify the split**, and the "power a pack down" test is
+> retired in its old form. Nothing else in this document depended on it — the ordinal
+> attribution never used 0x90 as an input, only as one of six per-pack constants in the
+> 143-frame cross-check, and that check would now be run without it.
+>
+> What the bytes mean is open. They look like two-byte records: accu 2 pushed `(0D, 02)` and
+> then `(0C, 02)`, and the 4.x register held `(01, 0E)` twice. If the second byte of each
+> pair is a fixed tag, the payload bytes are `0D` and `0C` — 13 and 12, one apart and
+> descending, which is suggestive and nothing more on two samples. Neither push coincided
+> with anything visible: the 18:46 and 19:26 events on 07-29 fall in an ordinary evening
+> discharge, with no step in current, voltage, temperature or solar output at either moment.
+> An event log that fires roughly twice a week and leaves four bytes of history is going to
+> take a while.
 
 > **Correction: 0x14 and 0x0C are temperature, not state of charge and not an accumulator.**
 > Both SoC readings were written down while the two packs were still being averaged into a
@@ -709,17 +741,19 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   deeper in the cell stack look identical from the bus. A fast *electrical* transient with no
   thermal content — a big load step at constant ambient — would separate them, since a filter
   would still lag and a buried sensor would have nothing to lag behind.
-- **What the charger's state nibble counts.** 0x26 `d3` and 0x60 `d1` are both 3 whenever the
-  panel delivers and 0 when it does not. A bulk/absorption/float stage number is the obvious
-  guess and predicts other values on a day that charges to absorption; the hourly captures
-  will catch it without anything being set up.
-- **Whether `d3` of 0x90 belongs to the pack or to the slot.** It now reads 1 and 2 in poll
-  order across 1364 consecutive cycles, which is why it is marked LIKELY as a poll-cycle
-  index. The open half is what happens when the order changes: power one pack down and back
-  up, and either `d3` follows the new position — an index the master assigns — or it stays
-  with its pack, in which case it identifies a pack on every frame instead of once per
-  identity poll. Until that test is run, it may be read but must not be used to attribute
-  frames; that would be circular, since the reading was derived from the attribution.
+- **What the charger's state nibble counts.** 0x26 `d3` and 0x60 `d1` move together and were
+  3 whenever the panel delivered and 0 when it did not. They have since also been seen at
+  **6** (2026-07-29 late afternoon) and **4** (2026-08-03 midday), so the day/night reading
+  was the two values a short window happened to contain. A bulk/absorption/float stage number
+  is still the obvious guess; four distinct values is enough that the next step is to line
+  the nibble up against charge current and voltage over a full week rather than guess.
+- **What 0x90's bytes record.** The shift structure is settled (see the correction above);
+  the payload is not. Accu 2 has pushed `(0D, 02)` and `(0C, 02)`, accu 1 nothing at all in a
+  week. Two things would crack it cheaply: a push that coincides with something visible, and
+  a push on accu 1, which would say whether the recurring `02` is accu 2's own tag. Both need
+  patience rather than setup — but the register must be logged as raw bytes with timestamps,
+  because it is the transitions that carry the information and a snapshot every hour throws
+  away which byte moved.
   Note also that an earlier capture read 1 and **0**, which the index hypothesis does not
   yet account for.
 - Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
@@ -752,10 +786,12 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
 > sensor would have twitched. Treat 27.0 °C as a configured constant until something
 > makes it move.
 >
-> **Superseded by the firmware update.** The firmware update moved it: 0x90 now reads
-> `00 00 00 x` with a per-pack `x`. So it was never a configured constant either — the
-> conclusion drawn here was right to reject the temperature reading and wrong in what it
-> put in its place. See the correction under the 0x85 register table.
+> **Superseded twice.** The firmware update moved it, so it was never a configured constant
+> either — the conclusion drawn here was right to reject the temperature reading and wrong in
+> what it put in its place. The replacement, `00 00 00 x` with a per-pack `x`, has since gone
+> the same way: 0x90 is a shift register that the update had cleared, and `01 0E 01 0E` was
+> simply a full one. Three readings of one register, each refuted by the data that arrived
+> after it. See the correction under the 0x85 register table.
 >
 > **0x0C reverses.** It stepped 740 → 750 → 760 → 770 → 780 over the drive, but between
 > every step it fell back one step and climbed again, and it was still oscillating
