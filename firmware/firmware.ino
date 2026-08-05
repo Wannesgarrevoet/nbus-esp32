@@ -70,6 +70,9 @@ struct MqttConfig {
 bool g_shouldSaveConfig = false;
 bool g_portalActive     = false;
 bool g_netServicesUp    = false;
+uint32_t g_portalSinceMs = 0;
+uint32_t g_lastWifiOkMs  = 0;
+uint32_t g_lastWifiTryMs = 0;
 
 // Per-group last-seen timestamps for staleness.
 // Freshness is per pack, not per NAD: both packs answer on 0x85, so a single timestamp
@@ -80,6 +83,7 @@ uint32_t g_lastSolarMs   = 0;
 uint32_t g_lastStarterMs = 0;
 
 uint32_t g_lastPublishMs   = 0;
+uint32_t g_lastDiagMs      = 0;
 uint32_t g_lastMqttTryMs   = 0;
 uint32_t g_lastHeartbeatMs = 0;
 bool     g_discoverySent   = false;
@@ -282,7 +286,8 @@ void startProvisioning() {
   if (wm.autoConnect(NBUS_AP_NAME)) {
     onWifiUp();
   } else {
-    g_portalActive = true;
+    g_portalActive  = true;
+    g_portalSinceMs = millis();
     Serial.printf("[wifi] connect failed (status %d) - portal %s open at 192.168.4.1\n",
                   (int)WiFi.status(), NBUS_AP_NAME);
     logVisibleNetworks();
@@ -464,6 +469,35 @@ void handleProvisioning() {
     g_portalActive = false;
     wm.stopConfigPortal();  // frees port 80 before the OTA server binds to it
     onWifiUp();
+    return;
+  }
+  // wm.process() returns true only on a submitted form, so a portal opened because the
+  // saved AP happened to be down at boot never closes by itself.
+  if (!WiFi.SSID().isEmpty() && (millis() - g_portalSinceMs) > NBUS_PORTAL_REBOOT_MS) {
+    Serial.println(F("[wifi] portal open with saved credentials — rebooting to retry"));
+    delay(200);
+    ESP.restart();
+  }
+}
+
+// Recovery from a Wi-Fi association lost *after* setup succeeded. The portal case is
+// handled above; this is the plain drop.
+void handleWifiWatchdog() {
+  if (g_portalActive) return;
+  const uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED) { g_lastWifiOkMs = now; return; }
+  if (g_lastWifiOkMs == 0) g_lastWifiOkMs = now;
+
+  const uint32_t down = now - g_lastWifiOkMs;
+  if (down > NBUS_WIFI_REBOOT_MS) {
+    Serial.printf("[wifi] down %lu s — rebooting\n", (unsigned long)(down / 1000));
+    delay(200);
+    ESP.restart();
+  }
+  if (down > NBUS_WIFI_GRACE_MS && (now - g_lastWifiTryMs) > NBUS_WIFI_RETRY_MS) {
+    g_lastWifiTryMs = now;
+    Serial.printf("[wifi] down %lu s — reconnecting\n", (unsigned long)(down / 1000));
+    WiFi.reconnect();
   }
 }
 
@@ -505,7 +539,8 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
                             const String& devSuffix = String(),
                             const String& devName = String(),
                             const char* devModel = NBUS_DEVICE_MDL,
-                            const String& devSw = String()) {
+                            const String& devSw = String(),
+                            const char* entCat = nullptr) {
   JsonDocument doc;
   doc["name"]         = name;
   doc["uniq_id"]      = String(NBUS_DEVICE_ID) + "_" + key;
@@ -514,6 +549,7 @@ void publishDiscoverySensor(const char* key, const char* name, const char* state
   if (unit && unit[0])   doc["unit_of_meas"] = unit;
   if (devCla && devCla[0]) doc["dev_cla"]    = devCla;
   if (stateCla && stateCla[0]) doc["stat_cla"] = stateCla;
+  if (entCat && entCat[0]) doc["ent_cat"]    = entCat;
   doc["avty_t"]       = statusTopic();
   JsonObject dev = doc["dev"].to<JsonObject>();
   if (devSuffix.isEmpty()) addBridgeDevice(dev);
@@ -761,6 +797,20 @@ void publishBridgeDiscovery() {
                          "{{ value_json.dropped }}", "", "", "total_increasing");
   publishDiscoverySensor("cycle_accepted", "Poll cycles accepted", ct.c_str(),
                          "{{ value_json.accepted }}", "", "", "total_increasing");
+
+  // Uptime is the one entity that says, after the fact, whether the reader lost power or
+  // only lost the network: a step down to zero is a reboot, a gap with no step is a
+  // dropout. Neither was answerable on 2026-08-05.
+  const String dt = cfg.base + "/diag";
+  publishDiscoverySensor("diag_uptime", "Uptime", dt.c_str(),
+                         "{{ value_json.uptime_s }}", "s", "duration", "measurement",
+                         String(), String(), NBUS_DEVICE_MDL, String(), "diagnostic");
+  publishDiscoverySensor("diag_rssi", "Wi-Fi signal", dt.c_str(),
+                         "{{ value_json.rssi }}", "dBm", "signal_strength", "measurement",
+                         String(), String(), NBUS_DEVICE_MDL, String(), "diagnostic");
+  publishDiscoverySensor("diag_heap", "Free heap", dt.c_str(),
+                         "{{ value_json.heap_free }}", "B", "data_size", "measurement",
+                         String(), String(), NBUS_DEVICE_MDL, String(), "diagnostic");
 }
 
 // Discovery is (re)published whenever the set of identified devices changes — on connect,
@@ -898,6 +948,18 @@ void publishState() {
     String payload; serializeJson(doc, payload);
     mqtt.publish((cfg.base + "/cycle").c_str(), payload.c_str(), true);
   }
+}
+
+// Reader health, on its own slower schedule than the bus readings. Not retained: a
+// retained uptime survives the reboot it is supposed to reveal, and would have Home
+// Assistant plot the last value from before a power cut as if it were current.
+void publishDiag() {
+  JsonDocument doc;
+  doc["uptime_s"]  = millis() / 1000;
+  doc["rssi"]      = WiFi.RSSI();
+  doc["heap_free"] = ESP.getFreeHeap();
+  String payload; serializeJson(doc, payload);
+  mqtt.publish((cfg.base + "/diag").c_str(), payload.c_str(), false);
 }
 
 // --------------------------------------------------------------------------
@@ -1430,6 +1492,7 @@ void loop() {
 
   readLin();
   handleProvisioning();
+  handleWifiWatchdog();
   if (g_netServicesUp) {
     httpServer.handleClient();
     ElegantOTA.loop();
@@ -1462,6 +1525,10 @@ void loop() {
     if (millis() - g_lastPublishMs > NBUS_PUBLISH_MS) {
       g_lastPublishMs = millis();
       publishState();
+    }
+    if (millis() - g_lastDiagMs > NBUS_DIAG_MS) {
+      g_lastDiagMs = millis();
+      publishDiag();
     }
   }
 

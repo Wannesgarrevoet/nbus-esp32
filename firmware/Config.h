@@ -13,7 +13,7 @@
 // one that succeeded. Bump NBUS_FW_VERSION whenever flashing something you may
 // later need to distinguish.
 // ---------------------------------------------------------------------------
-#define NBUS_FW_VERSION  "0.5.3"
+#define NBUS_FW_VERSION  "0.6.0"
 #define NBUS_FW_BUILD    __DATE__ " " __TIME__
 
 // ---------------------------------------------------------------------------
@@ -92,6 +92,24 @@
 // Reconnect backoff and heartbeat.
 #define NBUS_MQTT_RETRY_MS     5000
 #define NBUS_HEARTBEAT_MS      1000
+
+// Wi-Fi loss recovery. There is no path back from a dropped association on its own:
+// the MQTT retry that ends in a reboot is gated behind WL_CONNECTED, so a device that
+// loses the AP would sit reading the bus and publishing nowhere, indefinitely. On
+// 2026-08-05 it did exactly that for over eight hours.
+#define NBUS_WIFI_GRACE_MS     60000    // disconnected this long ⇒ force WiFi.reconnect()
+#define NBUS_WIFI_RETRY_MS     30000    // interval between those forced attempts
+#define NBUS_WIFI_REBOOT_MS    600000   // disconnected this long ⇒ reboot
+// Same failure seen from the other side: if the saved AP is merely down at boot — a router
+// that is slower to come up after a shared power cut — WiFiManager opens the setup portal
+// and stays there, because it only leaves on a submitted form. Reboot instead and retry the
+// saved credentials. Only when credentials exist: a genuinely unprovisioned device must
+// keep its portal up for as long as the user needs it.
+#define NBUS_PORTAL_REBOOT_MS  300000
+
+// Bridge diagnostics (uptime, RSSI, free heap). Without these a reboot is invisible after
+// the fact, and telling "lost power" from "lost Wi-Fi" means guessing.
+#define NBUS_DIAG_MS           30000
 
 // Watchdog timeout (seconds).
 #define NBUS_WDT_TIMEOUT_S     30
