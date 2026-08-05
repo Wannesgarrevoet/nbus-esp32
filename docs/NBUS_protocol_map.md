@@ -232,7 +232,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x0B | `b0` | State of Charge | % (0x4B = 75%) | CONFIRMED |
 | 0x0E | `b0` | "Quality" (SoH-like health/quality) | % | CONFIRMED |
 | 0x34 | `H1h H1l H2h H2l` | H1 = time to full, H2 = time to empty; the inactive one reads FFFF | minutes, big-endian 16-bit | CONFIRMED (both halves) |
-| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging | **1 Wh per count**, big-endian 16-bit | CONFIRMED (direction and unit) |
+| 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging. **Cleared by any interruption of the pack's supply** — not a lifetime total | **1 Wh per count**, big-endian 16-bit | CONFIRMED (direction, unit and reset condition) |
 | 0x36 | `Wh Wl (FF FF)` | remaining energy — the gauge's *estimate*, revised on load changes, not a coulomb integral | Wh, big-endian 16-bit | CONFIRMED |
 | 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
 | 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
@@ -242,7 +242,7 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0xA0 | `00 I 00 08` | `d1` = IAD, `d2 d3` = model number (5 / 0008) | — | CONFIRMED (app) |
 | 0xA1 | `05 01 x x` | firmware version `d0`.`d1` | — | CONFIRMED (app) |
 | 0x14 | `a b c 0A` | **new in firmware 5.1** — did not exist on 4.x. Three temperatures as `°C + 50`, one byte each, whole degrees, and **three physically separate sensors** — they spread to 2 °C in a fixed order under a 50 A charge. Responds fast; this is the register to use for live pack temperature. `d3 = 0x0A` is constant and is probably the scale factor 10 that turns them into 0x0C's units. **Not state of charge** — see the correction below | °C | CONFIRMED (independent sensor) |
-| 0x90 | `0C 02 0D 02` on accu 2; `00 00 00 01` on accu 1 | **a four-byte event log, shifted left**, newest byte at `d3`, cleared by the 5.1 firmware update and refilling since — six pushes observed directly in HA history, in three `(0C\|0D, 02)` pairs. Not a constant, not a temperature, and **not the poll-cycle index**: `d3` matched the slot only while one byte had been pushed. `02` closes a pair; the opening code's meaning is unknown. See the correction below | — | CONFIRMED (shift structure + pairing); code meaning UNRESOLVED |
+| 0x90 | `00 00 01 02` on accu 2; `00 00 00 01` on accu 1 | **a four-byte event log, shifted left**, newest byte at `d3`, **cleared whenever the pack loses power** — so it holds only the events since the last boot. Six pushes were observed in HA history before the 2026-08-05 outage cleared both packs, in three `(0C\|0D, 02)` pairs. Not a constant, not a temperature, and **not the poll-cycle index**. `02` closes a pair; **`01` opens one and means power-on**, the only opening code with a known cause. See the corrections below | — | CONFIRMED (shift structure, pairing, reset condition, code `01`); other codes UNRESOLVED |
 | 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`: **pack temperature** as `(°C + 50) × 10`, so 730 = 23 °C. Always an exact multiple of ten because the pack measures whole degrees; it dithers when a sensor sits on a degree boundary. **Lagged** — a first-order response with a time constant of about 3 hours. Unity gain, so it is right once things settle, but it trails badly during a change; prefer 0x14 for a live reading. Neither an SoC reading nor a counter — see the corrections below | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `d1` is 0 or 2 on both accus, and toggles | **a live status word, and no longer one that tells the packs apart.** "Accu 1 always reads 2, accu 2 reads 0" is dead twice over: a week of history has both packs toggling between 0 and 2 independently, several times each (accu 1: 2 → 0 on 07-29, back on 07-30, 0 on 08-02, back on 08-03; accu 2 similar but not in step). It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. **The `1A` excursion is the real clue** — see the 0x90 correction: on 07-31 accu 2's `d1` read `1A` for thirteen seconds and 0x90 logged a byte in the middle of it, which makes 0xF2 the live word and 0x90 its log | — | UNRESOLVED (status word; code space shared with 0x90) |
@@ -355,6 +355,41 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > Note also that only **accu 2** logs anything. Accu 1 has pushed nothing in six days and
 > still reads `00 00 00 01`. Two nominally identical packs, one of which keeps having events
 > and one of which does not, is worth watching on its own.
+
+> **A power cycle clears 0x90, and `01` is the first code with a known cause.** On 2026-08-05,
+> during a long drive, both packs shut down hard and simultaneously — LEDs dark, the 12 V
+> circuit dead, restored only by pressing the master pack's button. That is the "power a pack
+> down" test from above, run involuntarily and on both packs at once, and it answers the
+> question the retracted version was aiming at.
+>
+> **The packs cold-booted — 0x35 proves it.** `energy_charged` was 1003 Wh (accu 1) and 830 Wh
+> (accu 2) before the event and read **0** on both afterwards; `energy_discharged` went
+> 825/692 Wh → 33/26 Wh and climbed from there. So the clearing of the energy counters is
+> **not** a property of the 2026-07-27 firmware update, as recorded above — it is a property
+> of the restart the update entails. **0x35 is not a lifetime total. It is cleared by any
+> interruption of the pack's own supply**, which is worth knowing before it is used as an
+> energy-balance input.
+>
+> **0x90 was cleared too, not shifted.** Accu 2 went `0C 02 0D 02` → `00 00 01 02`. A shift
+> would have produced `02 0D 02 xx`; this is an empty register with two bytes pushed into it,
+> `01` and then `02`. Accu 1 reads `00 00 00 01`, which is what it read before — consistent
+> with a clear followed by one `01`, and 0x35 says the clear happened.
+>
+> So **`01` is pushed at power-on**, on both packs, and **`(01, 02)` is a complete pair** — the
+> first pair whose opening code has a known cause. Accu 2 closed it; accu 1 has not closed it
+> yet, and if the pairing rule holds it should push `02` at some point.
+>
+> This retracts the claim two paragraphs up that the "normal" code is per-pack — `02` on accu 2
+> and `01` on accu 1. Accu 1's `01` was never a closing push. It was the power-on push from the
+> restart the firmware update caused, sitting in an otherwise empty register, which is exactly
+> what it reads as again now.
+>
+> **What does not fit yet:** after the 07-27 update accu 2 held `00 00 00 02` — a single `02`
+> with no `01` before it — while the same pack logged `01` then `02` after this power cut. Either
+> the two restarts are distinguishable to the pack (a commanded restart against a supply
+> failure), or accu 2's sequence differs from accu 1's in a way not yet visible. One event of
+> each kind is not enough to choose, and the next unplanned outage will say more than a
+> deliberate one, since a clean power-down may well be the case that logs `02` alone.
 
 > **Correction: 0x14 and 0x0C are temperature, not state of charge and not an accumulator.**
 > Both SoC readings were written down while the two packs were still being averaged into a
