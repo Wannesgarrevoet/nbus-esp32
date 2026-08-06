@@ -220,6 +220,25 @@ serials stayed put. Anything that has to survive a firmware update — Home Assi
 IDs, long-run history — must key on the **serial number**. The address is worth publishing
 so that a reshuffle is visible in the history, but not worth keying on.
 
+It is not the firmware update that reassigns them, it is the restart. When both packs and the
+charger cold-booted on 2026-08-05 (see the 0x90 correction below), the addresses moved again:
+
+| device | before | after |
+|--------|--------|-------|
+| accu 1 (master) | 1 | **1** |
+| accu 2 | 11 | 15 |
+| charger | 13 | 16 |
+
+**The master keeps address 1; the others are handed new ones.** That fits `d0` of 0x60, where
+bit 0x20 is set only on the device at address 1 — the master is the node that assigns, so it
+has no reason to renumber itself. Two observations of the same pattern is still thin, but it
+is now a pattern rather than a one-off, and it means an address reshuffle in the history marks
+**a restart of the bus**, not necessarily a firmware change.
+
+Pack 2's `d0` in 0x54/0x55 moved with it, `00` → `01`. So that byte is not a stable per-device
+constant either, which is another reason the decoder is right to ignore it and read only
+`d1..d3`.
+
 ## Register map — NAD 0x85 (battery)
 
 Status is judged against **our own N-Bus captures**: CONFIRMED means we saw it on this
@@ -390,6 +409,39 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > failure), or accu 2's sequence differs from accu 1's in a way not yet visible. One event of
 > each kind is not enough to choose, and the next unplanned outage will say more than a
 > deliberate one, since a clean power-down may well be the case that logs `02` alone.
+
+> **The shift caught live: one full pair, with timestamps.** Every reading of 0x90 up to here
+> was a before-and-after comparison across a gap of hours or days, so the shift model was an
+> inference from endpoints. On 2026-08-06 accu 2 opened and closed a pair while nothing else
+> was happening, and Home Assistant recorded both transitions:
+>
+> | when (local) | 0x90 | what moved |
+> |--------------|------|------------|
+> | (from 08-05) | `00 00 01 02` | power-on pair from the outage |
+> | 12:47:36 | `00 01 02 0C` | `0C` pushed in at `d3` |
+> | 13:05:20 | `01 02 0C 02` | `02` pushed in, closing the pair |
+>
+> This is the model working exactly as written: one byte per push, everything shifts left, the
+> newest sits at `d3`, and `02` closes. Nothing was inferred across a gap — the intermediate
+> state `00 01 02 0C`, with `0C` open and unclosed, was observed directly for 17 min 44 s.
+>
+> **`0C` has no electrical correlate.** The window was checked against everything we record:
+> pack current stayed within ±3 A, pack voltage 13.42–13.46 V, all four cells within 3.34 V and
+> flat, 0x0C and 0x14 unchanged, the solar charger sat in bulk at 4–5 A throughout, and the
+> Orion was off. So `0C` is not an over-current, over-voltage, temperature or charge-stage
+> event. Whatever it records is internal to the pack and invisible from outside. Cell balancing
+> is the obvious guess given the duration and a nearly full pack, but it is a guess: the
+> balancing state is not on the bus, so this cannot be checked here.
+>
+> `0C` was also the oldest surviving code before the outage (`0C 02 0D 02`), so it recurs. That
+> makes it the best candidate for the first code to identify — it happens often enough to catch
+> again, and now that its open and close are separately timestamped, a repeat can be lined up
+> against anything else that is logged.
+>
+> Accu 1 meanwhile still reads `00 00 00 01`. Its closing `02` has not come 1.5 days on, which
+> starts to argue that `01` is not an event that closes at all — a pack that is powered stays
+> powered, so the pair may only complete at the next power-down. That would also explain the
+> single `02` after the 07-27 update, which is the loose end flagged directly above.
 
 > **Correction: 0x14 and 0x0C are temperature, not state of charge and not an accumulator.**
 > Both SoC readings were written down while the two packs were still being averaged into a
@@ -915,9 +967,14 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   Lining the nibble up against voltage and current over a week was indeed what did it. What
   remains is only the unseen values 1, 2 and 5, which this installation may never produce.
 - **What 0x90's bytes record.** The shift structure and the pairing are settled (see the
-  correction above); the payload is not. Accu 2 has logged three `(0C|0D, 02)` pairs in six
-  days and accu 1 nothing at all, and no push lines up with anything visible on the bus. Two
-  things would still crack it cheaply: **a push on accu 1**, which would say whether the
+  correction above, where a `(0C, 02)` pair was finally caught opening and closing live); the
+  payload is not. `01` = power-on is the only code with a known cause. Accu 2 keeps logging
+  `(0C|0D, 02)` pairs and accu 1 nothing at all, and no push lines up with anything visible on
+  the bus — the 08-06 pair was checked against current, voltage, cells, both temperature
+  registers and the charge stage, and all of them were flat through it. **`0C` is the code to
+  chase**, because it recurs often enough to catch again and its open and close are now
+  separately timestamped. Two other things would still crack it cheaply: **a push on accu 1**,
+  which would say whether the
   recurring `02` is accu 2's own tag rather than a shared idle code, and **a second 0xF2
   excursion to an unusual value** caught with its 0x90 push. The second test has narrowed
   since it was written: ordinary `00`/`02` movement in 0xF2 is now known to be unrelated to
