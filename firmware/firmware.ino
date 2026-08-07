@@ -179,6 +179,30 @@ void maybeFactoryReset() {
   Serial.println(F("[setup] BOOT released early — settings kept"));
 }
 
+// Why the last boot happened. An uptime that steps back to zero says the reader restarted;
+// it does not say whether the supply sagged, the firmware crashed, or a watchdog fired, and
+// those want completely different responses. On a vehicle where an intermittent connection
+// is already the leading suspect for a whole-system outage, "brownout" is electrical evidence
+// and "panic" is a bug — worth one word in the diagnostics rather than an evening of guessing.
+//
+// Published as a string, deliberately. The numeric enum is stable across IDF versions but
+// unreadable a month later in a history graph, which is exactly where this will be read.
+const char* resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "poweron";    // supply appeared — a real power cut or a replug
+    case ESP_RST_BROWNOUT:  return "brownout";   // supply sagged below the detector while running
+    case ESP_RST_PANIC:     return "panic";      // firmware crashed
+    case ESP_RST_INT_WDT:   return "int_wdt";    // interrupt watchdog — something blocked too long
+    case ESP_RST_TASK_WDT:  return "task_wdt";   // task watchdog
+    case ESP_RST_WDT:       return "wdt";        // some other watchdog
+    case ESP_RST_SW:        return "sw";         // our own ESP.restart(), e.g. the Wi-Fi watchdog
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_EXT:       return "ext";        // external reset pin
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "unknown";
+  }
+}
+
 // The ESP's disconnect reason is the only thing that separates a wrong passphrase
 // (reason 15, 4-way handshake timeout) from an AP that refuses or drops us.
 // Every line carries millis() so the association attempts can be lined up against the
@@ -811,6 +835,12 @@ void publishBridgeDiscovery() {
   publishDiscoverySensor("diag_heap", "Free heap", dt.c_str(),
                          "{{ value_json.heap_free }}", "B", "data_size", "measurement",
                          String(), String(), NBUS_DEVICE_MDL, String(), "diagnostic");
+  // No state class: this is a label, not a number to average. Its value is that Home
+  // Assistant records the transition, so the next unattended restart explains itself
+  // instead of having to be reconstructed from what happened to be recorded nearby.
+  publishDiscoverySensor("diag_reset", "Reset reason", dt.c_str(),
+                         "{{ value_json.reset }}", "", "", "",
+                         String(), String(), NBUS_DEVICE_MDL, String(), "diagnostic");
 }
 
 // Discovery is (re)published whenever the set of identified devices changes — on connect,
@@ -958,6 +988,10 @@ void publishDiag() {
   doc["uptime_s"]  = millis() / 1000;
   doc["rssi"]      = WiFi.RSSI();
   doc["heap_free"] = ESP.getFreeHeap();
+  // Repeated on every diag rather than published once at boot: the one time it matters is
+  // after an unattended restart, and a message sent while the network was still coming up
+  // is the message most likely to have been the one that got lost.
+  doc["reset"]     = resetReasonName();
   String payload; serializeJson(doc, payload);
   mqtt.publish((cfg.base + "/diag").c_str(), payload.c_str(), false);
 }
@@ -1163,6 +1197,7 @@ void handleStatus() {
   doc["version"]   = NBUS_FW_VERSION;
   doc["build"]     = NBUS_FW_BUILD;
   doc["uptime_s"]  = millis() / 1000;
+  doc["reset"]     = resetReasonName();
   doc["heap_free"] = ESP.getFreeHeap();
   doc["heap_min"]  = ESP.getMinFreeHeap();
   doc["rssi"]      = WiFi.RSSI();
