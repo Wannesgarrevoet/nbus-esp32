@@ -58,8 +58,11 @@ Everything below about telling them apart follows from that one fact.
 | NAD | Device | Serial | Bus address (0x60) | Firmware (0xA1) |
 |-----|--------|--------|--------------------|-----------------|
 | 0x85 | Leisure battery 1 (Tempra TLB150) | KAA2****53 | 1 | 5.1 (was 4.2) |
-| 0x85 | Leisure battery 2 (Tempra TLB150) | KAA2****95 | 11 (was 3) | 5.1 (was 4.0) |
-| 0x81 | Solar charger (MPPT) | ACD2****99 | 13 (was 9) | 5.4 |
+| 0x85 | Leisure battery 2 (Tempra TLB150) | KAA2****95 | 15 (was 3, then 11) | 5.1 (was 4.0) |
+| 0x81 | Solar charger (MPPT) | ACD2****99 | 16 (was 9, then 13) | 5.4 |
+
+The addresses in that column are what the bus happened to hand out at the last restart, not
+a property of the devices — see *Bus address is not a stable identity* below.
 
 ## Telling the two battery packs apart
 
@@ -178,6 +181,27 @@ drifts apart whenever one pack is taken off the bus and is never re-synced. The 
 measurement is the evidence; the SoC gap is not. The measurement that would settle it is a
 real load — a few tens of amps — with both packs' 0x02 recorded through it.
 
+**That measurement has now run, and at high current the packs do share.** A four-hour drive
+on 2026-08-08 put the alternator charger across both packs at up to 60 A. Binning every
+paired 0x02 sample by total current:
+
+| total current | samples | pack 1 share |
+|---|---|---|
+| 40–50 A | 550 | 54.8 % |
+| 50–60 A | 238 | 56.2 % |
+
+So the split at load is roughly even, with a consistent few-percent bias toward pack 1 — the
+signature of slightly lower resistance in one path, not of a pack refusing to participate.
+The near-zero discharge share seen in the 0.6 A capture above is therefore a small-load
+artefact: at that scale the split is set by millivolts of open-circuit difference, and it
+tells you nothing about the packs' capability.
+
+**The bias is wiring, not a degrading contact.** Re-seating both 60 A fuses changed it by
+less than the measurement noise: the same bins over the eight days *before* the re-seat read
+56.2 % and 52.9 %, against 54.8 % and 56.2 % after. A contact that was on its way out would
+have shifted. This is not a clearance for an intermittent connection elsewhere — it only
+says the steady-state asymmetry is fixed impedance.
+
 ## Device identity registers (both node types)
 
 These are the same on 0x85 and 0x81, and every field was read off the Dometic Power app's
@@ -187,7 +211,7 @@ device page **before** decoding it: three devices × four fields, all twelve mat
 |-----|-------|---------|--------|
 | 0x54 | `idx K A A` | three ASCII characters, the serial prefix (`d1..d3`) | CONFIRMED (app + label) |
 | 0x55 | `idx n n n` | serial number, 24-bit big-endian in `d1..d3` | CONFIRMED (app + label) |
-| 0x60 | `f0 00 A 00` | **`d2` = bus address** — the app's "Address" field: 1, 11, 13 | CONFIRMED (app) |
+| 0x60 | `f0 00 A 00` | **`d2` = bus address** — the app's "Address" field (1, 15, 16 as of 08-05; it is reassigned on every bus restart) | CONFIRMED (app) |
 | 0xA0 | `00 I Mh Ml` | `d1` = IAD, `d2 d3` = model number (battery 5/0008, charger 1/0005) | CONFIRMED (app) |
 | 0xA1 | `Ma mi x x` | **firmware version `d0`.`d1`** — 5.1 on the packs, 5.4 on the charger | CONFIRMED (app) |
 
@@ -253,8 +277,8 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x34 | `H1h H1l H2h H2l` | H1 = time to full, H2 = time to empty; the inactive one reads FFFF | minutes, big-endian 16-bit | CONFIRMED (both halves) |
 | 0x35 | `Ch Cl Dh Dl` | cumulative energy counters: C counts up only while charging, D only while discharging. **Cleared by any interruption of the pack's supply** — not a lifetime total | **1 Wh per count**, big-endian 16-bit | CONFIRMED (direction, unit and reset condition) |
 | 0x36 | `Wh Wl (FF FF)` | remaining energy — the gauge's *estimate*, revised on load changes, not a coulomb integral | Wh, big-endian 16-bit | CONFIRMED |
-| 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | LIKELY — values seen on our bus, cell order from BLE |
-| 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | LIKELY — values seen on our bus, cell order from BLE |
+| 0x56 | `c1h c1l c2h c2l` | cell voltages, cells 1 & 2 | 0.001 V (~3.3 V), big-endian | CONFIRMED (scaling, count) — cell *order* still from BLE, see below |
+| 0x57 | `c3h c3l c4h c4l` | cell voltages, cells 3 & 4 | 0.001 V, big-endian | CONFIRMED (scaling, count) — cell *order* still from BLE, see below |
 | 0x54 | `idx K A A` | serial prefix, three ASCII characters in `d1..d3` | text | CONFIRMED (app + label) |
 | 0x55 | `idx ** ** **` | serial number, 24-bit big-endian in `d1..d3` (= 2****53) | — | CONFIRMED (app + label) |
 | 0x60 | `f0 00 A 00` | `d2` = bus address. `d0` is not the same on both packs — 0x60 on accu 1, 0x40 on accu 2, 0x42 on the charger — and each device keeps its own value across a firmware update and an address change, so it is a device property rather than a slot or address artefact | — | CONFIRMED (app) for `d2`; `d0` UNRESOLVED |
@@ -265,6 +289,30 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 | 0x0C | `02 E4 FF FF` | 16-bit in `d0 d1`: **pack temperature** as `(°C + 50) × 10`, so 730 = 23 °C. Always an exact multiple of ten because the pack measures whole degrees; it dithers when a sensor sits on a degree boundary. **Lagged** — a first-order response with a time constant of about 3 hours. Unity gain, so it is right once things settle, but it trails badly during a change; prefer 0x14 for a live reading. Neither an SoC reading nor a counter — see the corrections below | 0.1 °C, offset 50 | CONFIRMED (independent sensor) |
 | 0xC0 / 0xF1 | all zero | never move; candidate alarm/fault bitmaps | — | UNRESOLVED |
 | 0xF2 | `d1` is 0 or 2 on both accus, and toggles | **a live status word, and no longer one that tells the packs apart.** "Accu 1 always reads 2, accu 2 reads 0" is dead twice over: a week of history has both packs toggling between 0 and 2 independently, several times each (accu 1: 2 → 0 on 07-29, back on 07-30, 0 on 08-02, back on 08-03; accu 2 similar but not in step). It is not a discharge-enable flag: accu 2 was discharging at up to 2.1 A while reading 0. **The `1A` excursion is the real clue** — see the 0x90 correction: on 07-31 accu 2's `d1` read `1A` for thirteen seconds and 0x90 logged a byte in the middle of it, which makes 0xF2 the live word and 0x90 its log | — | UNRESOLVED (status word; code space shared with 0x90) |
+
+**The cell voltages check out against the pack voltage.** 0x56/0x57 were LIKELY on the strength
+of the values sitting where cell voltages should sit; they can now be tested against a quantity
+measured elsewhere in the same frame set. Over the 08-08 drive, 349 samples of accu 1 pairing
+the four cells against 0x02's pack voltage across 13.33–14.28 V:
+
+| pack voltage band | samples | mean sum(cells) − pack V |
+|---|---|---|
+| 13.2–13.6 V | 43 | −0.038 V |
+| 13.6–14.0 V | 158 | −0.045 V |
+| 14.0–14.4 V | 148 | −0.119 V |
+
+Four cells summing to within 40–50 mV of the pack terminal voltage is only possible if the
+scaling is 0.001 V and the pack really is 4S — a 0.01 V scaling or a different cell count
+misses by volts, not millivolts. The residual growing to −119 mV at the top of charge is
+almost certainly sampling skew rather than a decode error: the cell registers and 0x02 arrive
+in different poll slots, and the pack voltage moves fastest on an absorption ramp, so the two
+readings are up to a cycle apart in time exactly where the voltage is changing quickest. (The
+single −0.538 V outlier in the set is one such pairing across a fast transient.) Maximum cell
+spread over the whole drive was 0.073 V.
+
+What this does **not** confirm is which physical cell is which: a sum is invariant under
+permutation. The order in the table still rests on lining the values up against the Dometic
+Power app over BLE, and would survive being wrong without anything downstream noticing.
 
 > **Correction: 0x90 is not a constant, and it is not two temperature sensors.**
 > On firmware 4.x this register read `01 0E 01 0E` — two identical 16-bit values of 270 —
@@ -429,17 +477,24 @@ bus. Anything resting on the BLE cross-check alone stays LIKELY until we capture
 > pack current stayed within ±3 A, pack voltage 13.42–13.46 V, all four cells within 3.34 V and
 > flat, 0x0C and 0x14 unchanged, the solar charger sat in bulk at 4–5 A throughout, and the
 > Orion was off. So `0C` is not an over-current, over-voltage, temperature or charge-stage
-> event. Whatever it records is internal to the pack and invisible from outside. Cell balancing
-> is the obvious guess given the duration and a nearly full pack, but it is a guess: the
-> balancing state is not on the bus, so this cannot be checked here.
+> event. Whatever it records is internal to the pack and invisible from outside.
+>
+> **Cell balancing was the obvious guess, and it is now refuted.** The guess was that a nearly
+> full pack sitting at length near the top of charge would balance, and that `0C` marked it. On
+> 2026-08-08 the alternator charger drove both packs to **100 % SoC, cells to 3.571 V, and about
+> two hours of absorption at 14.30 V** — a far stronger balancing condition than the mild ~90 %
+> midday that did produce a push on 08-06 — and **neither pack pushed anything into 0x90.** A
+> mechanism that fires under weak conditions and not under strong ones is not that mechanism.
+> There is no replacement hypothesis; `0C` is open again.
 >
 > `0C` was also the oldest surviving code before the outage (`0C 02 0D 02`), so it recurs. That
 > makes it the best candidate for the first code to identify — it happens often enough to catch
 > again, and now that its open and close are separately timestamped, a repeat can be lined up
 > against anything else that is logged.
 >
-> Accu 1 meanwhile still reads `00 00 00 01`. Its closing `02` has not come 1.5 days on, which
-> starts to argue that `01` is not an event that closes at all — a pack that is powered stays
+> Accu 1 meanwhile still reads `00 00 00 01`. Its closing `02` has not come **three days on**,
+> across a four-hour drive, a full charge to 100 % and two hours of absorption — which argues
+> that `01` is not an event that closes at all — a pack that is powered stays
 > powered, so the pair may only complete at the next power-down. That would also explain the
 > single `02` after the 07-27 update, which is the loose end flagged directly above.
 
@@ -748,13 +803,36 @@ the other.
 | 0x0B | `b0` | 78 — same layout as the battery's SoC register, but the battery reported 56 % at the same moment | % | UNCERTAIN |
 | 0x54 | `01 41 43 44` | serial prefix, three ASCII characters in `d1..d3` ("ACD") | text | CONFIRMED (app + label) |
 | 0x55 | `00 ** ** **` | serial number, 24-bit big-endian in `d1..d3` (= 2****99) | — | CONFIRMED (app + label) |
-| 0x60 | `42 s 0D 00` | `d2` = bus address (13; was 9 before the update). **`d1` is not identity — it is the charge stage**: 0 = off, 3 = bulk, 4 = absorption, 6 = float. Always equal to 0x26 `d3` (see below) | — | CONFIRMED (app) for `d2`; CONFIRMED (charge stage) for `d1` |
+| 0x60 | `42 s 10 00` | `d2` = bus address (16 since the 08-05 restart; 13 before it, 9 before the firmware update). **`d1` is not identity — it is the charge stage**: 0 = off, 3 = bulk, 4 = absorption, 6 = float. Always equal to 0x26 `d3` (see below) | — | CONFIRMED (app) for `d2`; CONFIRMED (charge stage) for `d1` |
 | 0xA0 | `01 01 00 05` | `d1` = IAD, `d2 d3` = model number (1 / 0005) | — | CONFIRMED (app) |
 | 0xA1 | `05 04 03 04` | firmware version `d0`.`d1` = 5.4 | — | CONFIRMED (app) |
 | 0x26 | `01 00 05 s` | **not constant** — `d3` is the **charge stage**: 0 = off, 3 = bulk, 4 = absorption, 6 = float. Byte-for-byte identical to 0x60 `d1` in every capture. `d0 d1 d2` = `01 00 05` repeat 0xA0's model number | — | CONFIRMED (charge stage) |
 | 0xD0 | constant | `00 20 00 00` | — | UNRESOLVED |
 | 0x0C / 0xC0 / 0xF0 / 0xF1 | `FF FF FF FF` or all zero | never move; candidate unsupported-parameter and alarm/fault slots | — | UNRESOLVED |
-| 0xE0 | `00 00 00 01` | **moved once**: `00 00 00 00` → `00 00 00 01` somewhere in the five-day capture blackout of 07-29 → 08-03, and has held 1 since. Not temperature (it was 0 at 67.7 °C on 07-29) and not the charge stage (0 during float on 07-29). It is not published to MQTT, so the transition has no timestamp — which is exactly why it now will be | — | UNRESOLVED (one transition, cause unknown) |
+| 0xE0 | `00 00 00 00` | a one-byte flag in `d3` that has now been caught moving **with a timestamp** — see below. Not temperature (0 at 67.7 °C on 07-29) and not the charge stage as such (0 during float on 07-29) | — | LIKELY tied to absorption; one clean transition, prediction outstanding |
+
+> **0xE0 caught with a timestamp: `1 → 0`, two seconds before absorption ended.** The earlier
+> entry recorded a single transition lost inside a five-day capture blackout, and noted that
+> publishing the register to MQTT was the point. That has paid off. On **2026-08-05 at
+> 22:28:09** 0xE0 went `00 00 00 01` → `00 00 00 00`, and **two seconds later, at 22:28:11**,
+> the charge stage (0x60 `d1` / 0x26 `d3`) went absorption → off. Two seconds is one poll
+> cycle: as far as this bus can resolve, the two moved together.
+>
+> That makes absorption the leading reading — 0xE0 = 1 while the charger is in, or entitled to
+> enter, absorption, and 0 otherwise. The supporting evidence is negative but consistent: in
+> the three days since, 0xE0 has held 0 continuously, and over exactly those three days the
+> NDS charger has been **in bulk only and has never re-entered absorption** (checked 08-06,
+> 08-07 and 08-08).
+>
+> **The prediction, stated so it can fail:** the next time the NDS charger reaches absorption,
+> 0xE0 should read 1, and it should get there at or just before the stage change rather than
+> after it. If absorption comes and 0xE0 stays 0, this reading is dead.
+>
+> One caution against over-reading the correlation. 0xE0 is not simply a copy of the stage
+> byte — it was 0 during float on 07-29, where a "charger is regulating" flag would have been
+> 1. And note the charger's stage reflects **its own** regulation, not the state of the bank:
+> on 08-08 the packs were driven to 100 % by the alternator charger while this charger sat in
+> bulk all day. Whatever 0xE0 tracks, it tracks it from inside the solar charger.
 
 > **Why 0x1B is read as panel voltage.** It looks like noise at first — 187 distinct values
 > in 222 samples, swinging 13.5–24.5 V from one frame to the next. But the sequence is not
@@ -895,9 +973,12 @@ with "charging" should be checked against which source is actually running befor
 written down: a register that tracks absorption voltage and a register that tracks solar
 yield look identical if every capture happens to be taken while driving.
 
-The pending 0x14 test needs this. "Charge to absorption and see whether 0x14 climbs while
-0x0B barely moves" is a Victron `charge_state` transition, not something the N-Bus
-announces.
+This is not a hypothetical convenience — it has since decided two questions. The 0x14 test
+("charge to absorption and see whether 0x14 climbs while 0x0B barely moves") was a Victron
+`charge_state` transition, not something the N-Bus announces. And on 2026-08-08 the Orion
+drove both packs to 100 % while NAD 0x81 sat in bulk all day, which is the observation that
+separates *the charger's stage* from *the state of the bank* — the two would have been
+indistinguishable in any capture taken while the solar charger happened to be the only source.
 
 ### The Westfalia bus, and an independent meter on the same bank
 
@@ -934,10 +1015,22 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
 
 - Whether 0xC0 / 0xF0 / 0xF1 really are alarm bitmaps. They are all zero on a healthy bus,
   which is exactly what an alarm register looks like when nothing is wrong — and also
-  exactly what an unused register looks like. **A capture taken during a power loss would
-  separate the two**, which makes them worth publishing to MQTT even unnamed. They stayed
-  zero throughout the 2026-07-26 drive, including engine cranking, so they are at least not
-  set by ordinary events.
+  exactly what an unused register looks like. They stayed zero throughout the 2026-07-26
+  drive, including engine cranking, so they are at least not set by ordinary events.
+
+  **The proposed test has run, and it came back negative.** The 2026-08-05 event took the
+  whole bus down hard — both packs and the charger cold-booted, 0x35 cleared, 0x90 cleared,
+  addresses reassigned — which is the closest thing to a fault this installation has produced.
+  Through it and through everything since, **0xC0 and 0xF1 on both packs and 0xC0 / 0xF0 /
+  0xF1 on the charger held `00 00 00 00` without a single sample deviating.**
+
+  This is weaker than it looks, and it is worth being explicit about why: these registers are
+  cleared at power-up along with everything else volatile in the pack, so a flag *set* by the
+  shutdown would have been wiped by the boot that followed it, and the ESP was reading nothing
+  during the outage itself. The test discriminates only if the fault is latched across a boot.
+  What would actually settle it is a fault the bus survives — a cell over-temperature or an
+  over-current trip with the packs still talking. That cannot be arranged safely on purpose,
+  so this stays open and the registers stay published.
 - **What 0xF2 = 2 means — and what it is not.** It has been caught changing twice on one
   pack: briefly after a firmware update, and again on 2026-07-27 at 20:07 local, within
   minutes of solar output falling to zero. That coincidence suggested a charge-related state,
@@ -985,8 +1078,14 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
   registers, Home Assistant times them.**
 - Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
   coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
-- Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
-  project; the values themselves we do see on our bus.
+- Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE project.
+  The scaling and the cell count are no longer in doubt — the four cells sum to the pack
+  voltage within tens of millivolts over a 349-sample drive (see the 0x85 table) — but a sum
+  is invariant under permutation, so the ordering can only be closed against the app or by
+  disturbing one known cell.
+- **Whether the charger's 0xE0 marks absorption.** One timestamped `1 → 0` two seconds ahead
+  of absorption → off, and three days at 0 during which the charger never left bulk. The next
+  absorption decides it: 0xE0 should read 1. See the 0x81 table.
 
 > **The drive capture, 2026-07-26 20:45–22:45.** Two hours of driving, recorded in Home
 > Assistant rather than the ring: charging peaked at **49.7 A**, SoC went 50 → 73 %, and
@@ -1030,10 +1129,6 @@ contains a 50 A charge instead of against a guess about what 27.0 °C should loo
 > In hindsight this is a pack warming from 24 °C to 28 °C over two hours of driving and
 > then holding its heat after the engine stopped, which is exactly what the reading below
 > says it should do. The observation was right and the interpretation was missing a unit.
-- Whether solar 0x0B (78) is the charger's own cruder SoC estimate alongside the battery's
-  coulomb-counted 56 %. Solar 0x11's slow fall is answered: it is the charger cooling down.
-- Cell *order* within 0x56/0x57 (which physical cell is which) comes from the BLE
-  project; the values themselves we do see on our bus.
 
 ## Cross-reference: BLE project (MartinusTech)
 
